@@ -1,0 +1,38 @@
+# Dependências e arquivos gerados
+node_modules
+dist/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+coverage/
+*.log
+
+# Dados da instalação, exportações e segredos
+*.db
+*.db-*
+*.db.*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.backup
+*.bak
+*.zip
+data/
+backups/
+exports/
+For_App*.csv
+src/data/chartlinkCatalog*.json
+src/data/chartlinkCatalog.ts
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Configuração local do editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

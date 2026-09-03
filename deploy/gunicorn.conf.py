@@ -1,0 +1,10 @@
+bind = "0.0.0.0:5000"
+chdir = "/app/backend"
+workers = 1
+worker_class = "gthread"
+threads = 4
+timeout = 120
+graceful_timeout = 30
+accesslog = "-"
+errorlog = "-"
+worker_tmp_dir = "/tmp"

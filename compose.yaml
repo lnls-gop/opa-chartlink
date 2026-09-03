@@ -1,0 +1,51 @@
+name: chartlink
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      CHARTLINK_DATABASE: /data/chartlink.db
+      CHARTLINK_REQUIRE_DATABASE: "1"
+      CHARTLINK_BACKUP_DIR: /backups
+    volumes:
+      - ${CHARTLINK_DATA_DIR:?Defina CHARTLINK_DATA_DIR no .env}:/data
+      - ${CHARTLINK_BACKUP_DIR:?Defina CHARTLINK_BACKUP_DIR no .env}:/backups
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=3).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${CHARTLINK_BIND_IP:-127.0.0.1}:${CHARTLINK_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
