@@ -12,6 +12,9 @@ dist
 **/*.backup
 **/*.bak
 **/*.zip
+**/*.tar
+**/*.tar.gz
+chartlink-imagens-*
 **/*.log
 data
 backups

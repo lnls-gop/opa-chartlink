@@ -7,9 +7,10 @@ interface AppDialogProps {
   children: ReactNode;
   onClose: () => void;
   busy?: boolean;
+  wide?: boolean;
 }
 
-export function AppDialog({ title, children, onClose, busy = false }: AppDialogProps) {
+export function AppDialog({ title, children, onClose, busy = false, wide = false }: AppDialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const reduceMotion = useReducedMotion();
@@ -19,7 +20,7 @@ export function AppDialog({ title, children, onClose, busy = false }: AppDialogP
     return () => { if (dialog?.open) dialog.close(); };
   }, []);
   return (
-    <dialog ref={ref} aria-labelledby={titleId} className="chartlink-dialog"
+    <dialog ref={ref} aria-labelledby={titleId} className={`chartlink-dialog${wide ? ' chartlink-dialog-wide' : ''}`}
       onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}
       onClick={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
       <motion.div initial={{ opacity: 0, y: reduceMotion ? 0 : 12 }} animate={{ opacity: 1, y: 0 }}

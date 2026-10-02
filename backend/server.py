@@ -4,15 +4,48 @@ import uuid
 import time
 import re
 import os
+import json
+import secrets
+import hmac
+from datetime import timedelta
+from functools import wraps
 from pathlib import Path
-from flask import Flask, request, jsonify, g
+import click
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
+from flask import Flask, request, jsonify, g, session
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+secret_key = os.environ.get("CHARTLINK_SECRET_KEY", "").strip()
+if not secret_key:
+    if os.environ.get("CHARTLINK_REQUIRE_DATABASE", "0") == "1":
+        raise RuntimeError("Defina CHARTLINK_SECRET_KEY antes de iniciar o ChartLink em produção.")
+    secret_key = secrets.token_hex(32)
+    print("AVISO: CHARTLINK_SECRET_KEY temporária; sessões serão perdidas ao reiniciar.")
+app.config.update(
+    SECRET_KEY=secret_key,
+    SESSION_COOKIE_NAME="chartlink_session",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("CHARTLINK_COOKIE_SECURE", "0") == "1",
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=int(os.environ.get("CHARTLINK_SESSION_MINUTES", "30"))),
+    MAX_CONTENT_LENGTH=int(os.environ.get("CHARTLINK_MAX_REQUEST_BYTES", str(20 * 1024 * 1024))),
+)
 allowed_origins = [value.strip() for value in os.environ.get("CHARTLINK_CORS_ORIGINS", "").split(",") if value.strip()]
 if allowed_origins:
-    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
+    CORS(app, resources={r"/api/*": {"origins": allowed_origins}}, supports_credentials=True)
 DATABASE = str(Path(os.environ.get("CHARTLINK_DATABASE", str(Path(__file__).resolve().parent / "chartlink.db"))).expanduser().resolve())
+UNCLASSIFIED_CATEGORY = "Links não classificados"
+PASSWORD_HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
+DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash("senha-ficticia-nao-utilizavel")
+LOGIN_MAX_FAILURES = int(os.environ.get("CHARTLINK_LOGIN_MAX_FAILURES", "5"))
+LOGIN_LOCK_MINUTES = int(os.environ.get("CHARTLINK_LOGIN_LOCK_MINUTES", "15"))
+PUBLIC_CREATE_LIMIT = int(os.environ.get("CHARTLINK_PUBLIC_CREATE_LIMIT", "30"))
+PUBLIC_CREATE_WINDOW_SECONDS = int(os.environ.get("CHARTLINK_PUBLIC_CREATE_WINDOW_SECONDS", "600"))
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9._-]{3,64}$")
 
 
 def get_db():
@@ -24,6 +57,176 @@ def get_db():
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
     return db
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def client_ip():
+    return request.remote_addr or "desconhecido"
+
+
+def csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+def current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    row = get_db().execute(
+        "SELECT id,username,display_name,role,active,must_change_password FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    if not row or not row["active"]:
+        session.clear()
+        return None
+    return row
+
+
+def user_payload(row):
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "displayName": row["display_name"],
+        "role": row["role"],
+        "mustChangePassword": bool(row["must_change_password"]),
+    }
+
+
+def auth_payload():
+    user = current_user()
+    role = user["role"] if user else "guest"
+    return {
+        "authenticated": user is not None,
+        "user": user_payload(user),
+        "csrfToken": csrf_token(),
+        "permissions": {
+            "createLink": True,
+            "assignLinkCategory": user is not None,
+            "manageLinks": user is not None,
+            "manageFolders": user is not None,
+            "deleteLinks": user is not None,
+            "purgeLinks": role == "admin",
+            "manageUsers": role == "admin",
+        },
+    }
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return jsonify({"error": "Faça login para realizar esta operação.", "code": "authentication_required"}), 401
+        if user["must_change_password"] and request.endpoint not in {"auth_change_password", "auth_logout", "auth_session"}:
+            return jsonify({"error": "Troque a senha temporária antes de continuar.", "code": "password_change_required"}), 403
+        g.current_user = user
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return jsonify({"error": "Faça login para realizar esta operação.", "code": "authentication_required"}), 401
+        if user["must_change_password"]:
+            return jsonify({"error": "Troque a senha temporária antes de continuar.", "code": "password_change_required"}), 403
+        if user["role"] != "admin":
+            return jsonify({"error": "Esta operação é exclusiva para administradores.", "code": "forbidden"}), 403
+        g.current_user = user
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def audit(action, entity_type, entity_id=None, details=None, actor=None):
+    user = actor if actor is not None else getattr(g, "current_user", None) or current_user()
+    get_db().execute(
+        """INSERT INTO audit_log(actor_user_id,actor_username,action,entity_type,entity_id,details,ip_address,user_agent,created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (
+            user["id"] if user else None,
+            user["username"] if user else None,
+            action,
+            entity_type,
+            str(entity_id) if entity_id is not None else None,
+            json.dumps(details or {}, ensure_ascii=False, separators=(",", ":")),
+            client_ip(),
+            request.user_agent.string[:300],
+            now_ms(),
+        ),
+    )
+
+
+def consume_rate_limit(key, limit, window_seconds):
+    db = get_db()
+    window = int(time.time()) // window_seconds
+    row = db.execute("SELECT window_id,count FROM rate_limits WHERE key=?", (key,)).fetchone()
+    if not row or row["window_id"] != window:
+        db.execute(
+            "INSERT INTO rate_limits(key,window_id,count) VALUES (?,?,1) ON CONFLICT(key) DO UPDATE SET window_id=excluded.window_id,count=1",
+            (key, window),
+        )
+        return True
+    if row["count"] >= limit:
+        return False
+    db.execute("UPDATE rate_limits SET count=count+1 WHERE key=?", (key,))
+    return True
+
+
+def validate_password(password, username=""):
+    if len(password) < 6:
+        return "A senha deve ter no mínino 6 caracteres."
+    if len(password) > 256:
+        return "A senha excede o limite permitido!"
+    if not any(caractere.isupper() for caractere in password):
+        return "A senha deve ter pelo menos uma letra maiúscula."
+    if not any(caractere.islower() for caractere in password):
+        return "A senha deve ter pelo menos uma letra minúscula."
+    if not any(not caractere.isalnum() and not caractere.isspace() for caractere in password):
+        return "A senha deve ter pelo menos um caractere especial."
+    if username and username.casefold() in password.casefold():
+        return "A senha não deve conter o nome de usuário."
+    return None
+
+
+def remaining_active_admins(excluding_id=None):
+    sql = "SELECT COUNT(*) FROM users WHERE active=1 AND role='admin'"
+    params = []
+    if excluding_id is not None:
+        sql += " AND id<>?"
+        params.append(excluding_id)
+    return get_db().execute(sql, params).fetchone()[0]
+
+
+@app.before_request
+def protect_state_changes():
+    if not request.path.startswith("/api/") or request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    expected = session.get("csrf_token", "")
+    supplied = request.headers.get("X-CSRF-Token", "")
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        return jsonify({"error": "Sessão de segurança ausente ou expirada. Atualize a página.", "code": "csrf_failed"}), 400
+    return None
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path.startswith("/api/auth/") or request.path.startswith("/api/admin/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.teardown_appcontext
@@ -41,7 +244,7 @@ def column_exists(db, table, column):
 def health():
     try:
         get_db().execute("SELECT 1 FROM links LIMIT 1").fetchone()
-        return jsonify({"status": "ok", "version": "1.0.0"})
+        return jsonify({"status": "ok", "version": "1.0.8"})
     except (sqlite3.Error, OSError):
         return jsonify({"status": "unavailable"}), 503
 
@@ -82,6 +285,40 @@ def init_db():
                 folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
                 PRIMARY KEY (link_id, folder_id)
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
+                active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                must_change_password INTEGER NOT NULL DEFAULT 1 CHECK(must_change_password IN (0,1)),
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until INTEGER DEFAULT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_login_at INTEGER DEFAULT NULL,
+                password_changed_at INTEGER DEFAULT NULL
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                actor_username TEXT,
+                action TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT,
+                details TEXT NOT NULL DEFAULT '{}',
+                ip_address TEXT NOT NULL,
+                user_agent TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                key TEXT PRIMARY KEY,
+                window_id INTEGER NOT NULL,
+                count INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_user_id,created_at DESC);
         """)
         if not column_exists(db, "links", "subcategory"):
             db.execute("ALTER TABLE links ADD COLUMN subcategory TEXT NOT NULL DEFAULT ''")
@@ -92,6 +329,11 @@ def init_db():
         if not column_exists(db, "links", "updated_at"):
             # NULL preserva a ausência de histórico anterior à atualização.
             db.execute("ALTER TABLE links ADD COLUMN updated_at INTEGER DEFAULT NULL")
+        if not column_exists(db, "links", "deleted_at"):
+            db.execute("ALTER TABLE links ADD COLUMN deleted_at INTEGER DEFAULT NULL")
+        if not column_exists(db, "links", "deleted_by"):
+            db.execute("ALTER TABLE links ADD COLUMN deleted_by INTEGER DEFAULT NULL")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_links_deleted_at ON links(deleted_at)")
 
         # NÃO inserir categorias demonstrativas. A base existente é a fonte de verdade.
         # Em uma instalação vazia, a aplicação inicia sem categorias; elas podem ser
@@ -115,6 +357,17 @@ def init_db():
                 if not srow:
                     db.execute("INSERT INTO folders(name,parent_id,created_at) VALUES (?,?,?)", (sub["name"], root_id, now))
 
+
+        # Mantém a tabela legada categories sincronizada com todas as
+        # categorias raiz existentes na árvore de folders.
+        db.execute("""
+            INSERT OR IGNORE INTO categories(name)
+            SELECT name
+            FROM folders
+            WHERE parent_id IS NULL
+        """)
+
+
         # Links legados: associa ao nó correspondente.
         rows = db.execute("SELECT id,category,subcategory,folder_id FROM links").fetchall()
         for link in rows:
@@ -132,6 +385,13 @@ def init_db():
             db.execute("INSERT OR IGNORE INTO link_folders(link_id,folder_id) VALUES (?,?)", (link["id"], folder_id))
         # Garante associações para Links já migrados.
         db.execute("INSERT OR IGNORE INTO link_folders(link_id,folder_id) SELECT id,folder_id FROM links WHERE folder_id IS NOT NULL")
+
+        # A área virtual mudou de nome. Isso roda depois da migração legada para
+        # não confundir links antigos ainda não associados às pastas equivalentes.
+        db.execute(
+            "UPDATE links SET category=?, subcategory='' WHERE folder_id IS NULL",
+            (UNCLASSIFIED_CATEGORY,),
+        )
         # Triggers cobrem também edição, movimentação e classificações pelas
         # rotas legadas. A primeira associação de um link novo não é uma edição.
         db.executescript("""
@@ -193,9 +453,9 @@ def folder_info(db, row):
 
 def sync_legacy_location(db, folder_id):
     if not folder_id:
-        return "Sem categoria", ""
+        return UNCLASSIFIED_CATEGORY, ""
     path = folder_path(db, folder_id)
-    return (path[0] if path else "Sem categoria", path[1] if len(path) > 1 else "")
+    return (path[0] if path else UNCLASSIFIED_CATEGORY, path[1] if len(path) > 1 else "")
 
 
 def build_folder_cache(db):
@@ -253,6 +513,231 @@ def link_payload(db, row, folder_cache=None):
 
 
 # ---------------------------------------------------------------------------
+# Autenticação local, usuários e auditoria
+# ---------------------------------------------------------------------------
+@app.route("/api/auth/session", methods=["GET"])
+def auth_session():
+    return jsonify(auth_payload())
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone()
+    # A verificação fictícia reduz diferenças de tempo para usuários inexistentes.
+    candidate_hash = row["password_hash"] if row else DUMMY_PASSWORD_HASH
+    valid = False
+    try:
+        valid = PASSWORD_HASHER.verify(candidate_hash, password)
+    except (VerifyMismatchError, InvalidHashError):
+        valid = False
+    now = now_ms()
+    locked = bool(row and row["locked_until"] and row["locked_until"] > now)
+    if not row or not row["active"] or locked or not valid:
+        if row and row["active"] and not locked:
+            attempts = row["failed_attempts"] + 1
+            lock_until = now + LOGIN_LOCK_MINUTES * 60_000 if attempts >= LOGIN_MAX_FAILURES else None
+            db.execute(
+                "UPDATE users SET failed_attempts=?,locked_until=?,updated_at=? WHERE id=?",
+                (0 if lock_until else attempts, lock_until, now, row["id"]),
+            )
+        audit("login_failed", "session", details={"username": username}, actor=None)
+        db.commit()
+        return jsonify({"error": "Usuário ou senha inválidos. Após várias tentativas, o acesso fica temporariamente bloqueado."}), 401
+    if PASSWORD_HASHER.check_needs_rehash(row["password_hash"]):
+        db.execute("UPDATE users SET password_hash=?,updated_at=? WHERE id=?", (PASSWORD_HASHER.hash(password), now, row["id"]))
+    db.execute("UPDATE users SET failed_attempts=0,locked_until=NULL,last_login_at=?,updated_at=? WHERE id=?", (now, now, row["id"]))
+    audit("login_succeeded", "session", row["id"], actor=row)
+    db.commit()
+    session.clear()
+    session.permanent = True
+    session["user_id"] = row["id"]
+    session["csrf_token"] = secrets.token_urlsafe(32)
+    return jsonify(auth_payload())
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+@login_required
+def auth_logout():
+    user = g.current_user
+    audit("logout", "session", user["id"])
+    get_db().commit()
+    session.clear()
+    session["csrf_token"] = secrets.token_urlsafe(32)
+    return jsonify(auth_payload())
+
+
+@app.route("/api/auth/change-password", methods=["POST"])
+@login_required
+def auth_change_password():
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get("currentPassword", ""))
+    new_password = str(data.get("newPassword", ""))
+    user = get_db().execute("SELECT * FROM users WHERE id=?", (g.current_user["id"],)).fetchone()
+    error = validate_password(new_password, user["username"])
+    if error:
+        return jsonify({"error": error}), 400
+    try:
+        if not PASSWORD_HASHER.verify(user["password_hash"], current_password):
+            raise VerifyMismatchError
+    except (VerifyMismatchError, InvalidHashError):
+        return jsonify({"error": "A senha atual está incorreta."}), 400
+    if current_password == new_password:
+        return jsonify({"error": "A nova senha deve ser diferente da senha atual."}), 400
+    now = now_ms()
+    get_db().execute(
+        "UPDATE users SET password_hash=?,must_change_password=0,password_changed_at=?,updated_at=? WHERE id=?",
+        (PASSWORD_HASHER.hash(new_password), now, now, user["id"]),
+    )
+    audit("password_changed", "user", user["id"])
+    get_db().commit()
+    return jsonify(auth_payload())
+
+
+@app.route("/api/admin/users", methods=["GET"])
+@admin_required
+def admin_list_users():
+    rows = get_db().execute(
+        """SELECT id,username,display_name,role,active,must_change_password,created_at,updated_at,last_login_at,password_changed_at
+           FROM users ORDER BY active DESC,display_name COLLATE NOCASE"""
+    ).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.route("/api/admin/users", methods=["POST"])
+@admin_required
+def admin_create_user():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "")).strip()
+    display_name = str(data.get("displayName", "")).strip()
+    password = str(data.get("password", ""))
+    role = str(data.get("role", "user"))
+    if not USERNAME_RE.fullmatch(username):
+        return jsonify({"error": "Use de 3 a 64 caracteres: letras, números, ponto, hífen ou sublinhado."}), 400
+    if not display_name or len(display_name) > 120:
+        return jsonify({"error": "Informe um nome de exibição com até 120 caracteres."}), 400
+    if role not in {"user", "admin"}:
+        return jsonify({"error": "Perfil inválido."}), 400
+    error = validate_password(password, username)
+    if error:
+        return jsonify({"error": error}), 400
+    now = now_ms()
+    try:
+        cursor = get_db().execute(
+            """INSERT INTO users(username,display_name,password_hash,role,active,must_change_password,created_at,updated_at)
+               VALUES (?,?,?,?,1,1,?,?)""",
+            (username, display_name, PASSWORD_HASHER.hash(password), role, now, now),
+        )
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "Já existe um usuário com esse login."}), 409
+    audit("user_created", "user", cursor.lastrowid, {"username": username, "role": role})
+    get_db().commit()
+    return jsonify({"id": cursor.lastrowid, "username": username, "display_name": display_name, "role": role, "active": 1, "must_change_password": 1}), 201
+
+
+@app.route("/api/admin/users/<int:user_id>", methods=["PUT"])
+@admin_required
+def admin_update_user(user_id):
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not target:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    display_name = str(data.get("displayName", target["display_name"])).strip()
+    role = str(data.get("role", target["role"]))
+    active = 1 if data.get("active", bool(target["active"])) else 0
+    new_password = str(data.get("newPassword", ""))
+    if not display_name or len(display_name) > 120 or role not in {"user", "admin"}:
+        return jsonify({"error": "Dados do usuário inválidos."}), 400
+    removing_admin = target["role"] == "admin" and (role != "admin" or not active)
+    if removing_admin and remaining_active_admins(excluding_id=user_id) == 0:
+        return jsonify({"error": "Não é permitido remover o último administrador ativo."}), 409
+    if user_id == g.current_user["id"] and not active:
+        return jsonify({"error": "Você não pode desativar a própria conta."}), 409
+    if user_id == g.current_user["id"] and role != target["role"]:
+        return jsonify({"error": "Outro administrador deve alterar o seu perfil."}), 409
+    password_hash = target["password_hash"]
+    must_change = target["must_change_password"]
+    password_changed_at = target["password_changed_at"]
+    if new_password:
+        error = validate_password(new_password, target["username"])
+        if error:
+            return jsonify({"error": error}), 400
+        password_hash = PASSWORD_HASHER.hash(new_password)
+        must_change = 1
+        password_changed_at = now_ms()
+    now = now_ms()
+    db.execute(
+        """UPDATE users SET display_name=?,role=?,active=?,password_hash=?,must_change_password=?,
+           password_changed_at=?,failed_attempts=0,locked_until=NULL,updated_at=? WHERE id=?""",
+        (display_name, role, active, password_hash, must_change, password_changed_at, now, user_id),
+    )
+    audit("user_updated", "user", user_id, {"role": role, "active": bool(active), "passwordReset": bool(new_password)})
+    db.commit()
+    return jsonify({"id": user_id, "username": target["username"], "display_name": display_name, "role": role, "active": active, "must_change_password": must_change})
+
+
+@app.route("/api/admin/audit", methods=["GET"])
+@admin_required
+def admin_audit():
+    limit = min(max(int(request.args.get("limit", "100")), 1), 500)
+    rows = get_db().execute(
+        """SELECT id,actor_username,action,entity_type,entity_id,details,ip_address,created_at
+           FROM audit_log ORDER BY created_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item["details"])
+        except (TypeError, json.JSONDecodeError):
+            item["details"] = {}
+        result.append(item)
+    return jsonify(result)
+
+
+def create_user_from_cli(username, display_name, password, role):
+    init_db()
+    username = username.strip()
+    display_name = display_name.strip()
+    if not USERNAME_RE.fullmatch(username):
+        raise click.ClickException("Login inválido. Use 3 a 64 letras, números, ponto, hífen ou sublinhado.")
+    if not display_name or len(display_name) > 120:
+        raise click.ClickException("Informe um nome de exibição com até 120 caracteres.")
+    if role not in {"user", "admin"}:
+        raise click.ClickException("Perfil inválido.")
+    error = validate_password(password, username)
+    if error:
+        raise click.ClickException(error)
+    with app.app_context():
+        db = get_db()
+        now = now_ms()
+        try:
+            db.execute(
+                """INSERT INTO users(username,display_name,password_hash,role,active,must_change_password,created_at,updated_at)
+                   VALUES (?,?,?,?,1,1,?,?)""",
+                (username, display_name, PASSWORD_HASHER.hash(password), role, now, now),
+            )
+            db.commit()
+        except sqlite3.IntegrityError as error_db:
+            raise click.ClickException("Já existe um usuário com esse login.") from error_db
+
+
+@app.cli.command("create-admin")
+@click.option("--username", prompt="Login do administrador")
+@click.option("--display-name", prompt="Nome de exibição")
+@click.password_option(confirmation_prompt=True)
+def create_admin_command(username, display_name, password):
+    """Cria o primeiro administrador sem expor a senha no terminal."""
+    create_user_from_cli(username, display_name, password, "admin")
+    click.echo("Administrador criado. A troca de senha será solicitada no primeiro acesso.")
+
+
+# ---------------------------------------------------------------------------
 # Pastas hierárquicas
 # ---------------------------------------------------------------------------
 @app.route("/api/folders", methods=["GET"])
@@ -268,8 +753,10 @@ def list_folders():
             UNION ALL
             SELECT c.root_id, f.id FROM closure c JOIN folders f ON f.parent_id=c.descendant_id
         )
-        SELECT c.root_id AS id, COUNT(DISTINCT lf.link_id) AS n
-        FROM closure c LEFT JOIN link_folders lf ON lf.folder_id=c.descendant_id
+        SELECT c.root_id AS id, COUNT(DISTINCT CASE WHEN l.deleted_at IS NULL THEN lf.link_id END) AS n
+        FROM closure c
+        LEFT JOIN link_folders lf ON lf.folder_id=c.descendant_id
+        LEFT JOIN links l ON l.id=lf.link_id
         GROUP BY c.root_id
     """).fetchall()}
     result = []
@@ -281,26 +768,69 @@ def list_folders():
 
 
 @app.route("/api/folders", methods=["POST"])
+@login_required
 def create_folder():
     data = request.get_json() or {}
     name = str(data.get("name", "")).strip()
     parent_id = data.get("parentId")
-    parent_id = int(parent_id) if parent_id not in (None, "", 0, "null") else None
+    parent_id = (
+        int(parent_id)
+        if parent_id not in (None, "", 0, "null")
+        else None
+    )
+
     if not name:
         return jsonify({"error": "Nome da pasta é obrigatório"}), 400
+
     db = get_db()
-    if parent_id is not None and not db.execute("SELECT 1 FROM folders WHERE id=?", (parent_id,)).fetchone():
-        return jsonify({"error": "Pasta pai não encontrada"}), 404
+
+    if parent_id is not None:
+        parent_exists = db.execute(
+            "SELECT 1 FROM folders WHERE id=?",
+            (parent_id,),
+        ).fetchone()
+
+        if not parent_exists:
+            return jsonify({"error": "Pasta pai não encontrada"}), 404
+
     try:
-        cur = db.execute("INSERT INTO folders(name,parent_id,created_at) VALUES (?,?,?)", (name, parent_id, int(time.time()*1000)))
+        cur = db.execute(
+            """
+            INSERT INTO folders(name, parent_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (name, parent_id, int(time.time() * 1000)),
+        )
+
+        if parent_id is None:
+            db.execute(
+                "INSERT OR IGNORE INTO categories(name) VALUES (?)",
+                (name,),
+            )
+
+        audit(
+            "folder_created",
+            "folder",
+            cur.lastrowid,
+            {"name": name, "parentId": parent_id},
+        )
         db.commit()
+
     except sqlite3.IntegrityError:
-        return jsonify({"error": "Já existe uma pasta com esse nome neste nível"}), 409
-    row = db.execute("SELECT id,name,parent_id FROM folders WHERE id=?", (cur.lastrowid,)).fetchone()
+        return jsonify(
+            {"error": "Já existe uma pasta com esse nome neste nível"}
+        ), 409
+
+    row = db.execute(
+        "SELECT id, name, parent_id FROM folders WHERE id=?",
+        (cur.lastrowid,),
+    ).fetchone()
+
     return jsonify(folder_info(db, row)), 201
 
 
 @app.route("/api/folders/<int:folder_id>/color", methods=["PUT"])
+@login_required
 def update_folder_color(folder_id):
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or "color" not in data:
@@ -313,11 +843,15 @@ def update_folder_color(folder_id):
     if not row:
         return jsonify({"error": "Pasta não encontrada"}), 404
     db.execute("UPDATE folders SET color=? WHERE id=?", (color.lower() if color else None, folder_id))
+
+
+    audit("folder_color_updated", "folder", folder_id, {"name": row["name"], "color": color})
     db.commit()
     return jsonify(folder_info(db, row))
 
 
 @app.route("/api/folders/<int:folder_id>", methods=["PUT"])
+@login_required
 def rename_folder(folder_id):
     data = request.get_json() or {}
     name = str(data.get("name", "")).strip()
@@ -332,6 +866,7 @@ def rename_folder(folder_id):
         # Mantém a compatibilidade das duas colunas legadas para o primeiro nível.
         if row["parent_id"] is None:
             db.execute("UPDATE links SET category=? WHERE folder_id=?", (name, folder_id))
+        audit("folder_renamed", "folder", folder_id, {"before": row["name"], "after": name})
         db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "Já existe uma pasta com esse nome neste nível"}), 409
@@ -340,6 +875,7 @@ def rename_folder(folder_id):
 
 
 @app.route("/api/folders/<int:folder_id>/move", methods=["POST"])
+@login_required
 def move_folder(folder_id):
     data = request.get_json() or {}
     parent_id = data.get("parentId")
@@ -363,6 +899,7 @@ def move_folder(folder_id):
         ) SELECT DISTINCT lf.link_id FROM link_folders lf WHERE lf.folder_id IN tree""", (folder_id,)).fetchall()]
         db.execute("""WITH RECURSIVE tree(id) AS (SELECT id FROM folders WHERE id=? UNION ALL SELECT f.id FROM folders f JOIN tree t ON f.parent_id=t.id)
                      UPDATE links SET category=?, subcategory=? WHERE folder_id IN tree""", (folder_id, cat, sub))
+        audit("folder_moved", "folder", folder_id, {"beforeParentId": row["parent_id"], "afterParentId": parent_id})
         db.commit()
     except sqlite3.IntegrityError:
         db.rollback(); return jsonify({"error":"Já existe uma pasta com esse nome no destino"}), 409
@@ -372,6 +909,7 @@ def move_folder(folder_id):
 
 
 @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
+@admin_required
 def delete_folder(folder_id):
     db = get_db()
     row = db.execute("SELECT id,name,parent_id FROM folders WHERE id=?", (folder_id,)).fetchone()
@@ -386,15 +924,16 @@ def delete_folder(folder_id):
                  DELETE FROM link_folders WHERE folder_id IN tree""", (folder_id,))
     db.execute("""UPDATE links SET folder_id=(SELECT lf.folder_id FROM link_folders lf WHERE lf.link_id=links.id ORDER BY lf.folder_id LIMIT 1)
                  WHERE id IN (%s)""" % (','.join('?' for _ in affected_ids),), affected_ids) if affected_ids else None
-    db.execute("UPDATE links SET category='Sem categoria', subcategory='' WHERE id IN (%s) AND folder_id IS NULL" % (','.join('?' for _ in affected_ids),), affected_ids) if affected_ids else None
+    db.execute("UPDATE links SET category=?, subcategory='' WHERE id IN (%s) AND folder_id IS NULL" % (','.join('?' for _ in affected_ids),), [UNCLASSIFIED_CATEGORY, *affected_ids]) if affected_ids else None
     if row["parent_id"] is None:
         db.execute("DELETE FROM subcategories WHERE category=?", (row["name"],))
         db.execute("DELETE FROM categories WHERE name=?", (row["name"],))
     db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+    audit("folder_deleted", "folder", folder_id, {"name": row["name"], "affectedLinks": affected_ids})
     db.commit()
     _, folder_cache = build_folder_cache(db)
     refreshed=[link_payload(db,r,folder_cache) for r in db.execute("SELECT * FROM links WHERE id IN (%s)" % (','.join('?' for _ in affected_ids),), affected_ids).fetchall()] if affected_ids else []
-    return jsonify({"deleted": folder_id, "destination": "Sem categoria", "links": refreshed})
+    return jsonify({"deleted": folder_id, "destination": UNCLASSIFIED_CATEGORY, "links": refreshed})
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +946,7 @@ def list_categories():
 
 
 @app.route("/api/categories", methods=["POST"])
+@login_required
 def add_category():
     data = request.get_json() or {}; name = str(data.get("name", "")).strip()
     if not name: return jsonify({"error":"Nome obrigatório"}),400
@@ -414,12 +954,14 @@ def add_category():
     try:
         db.execute("INSERT INTO categories(name) VALUES (?)",(name,))
         db.execute("INSERT INTO folders(name,parent_id,created_at) VALUES (?,NULL,?)",(name,int(time.time()*1000)))
+        audit("category_created", "category", name)
         db.commit()
     except sqlite3.IntegrityError: return jsonify({"error":"Categoria já existe"}),409
     return jsonify({"name":name}),201
 
 
 @app.route("/api/categories/<string:old_name>", methods=["PUT"])
+@login_required
 def rename_category(old_name):
     data=request.get_json() or {}; new=str(data.get("newName","")).strip()
     if not new or new==old_name: return jsonify({"name":new})
@@ -429,21 +971,26 @@ def rename_category(old_name):
     db.execute("UPDATE subcategories SET category=? WHERE category=?",(new,old_name))
     root=db.execute("SELECT id FROM folders WHERE name=? AND parent_id IS NULL",(old_name,)).fetchone()
     if root: db.execute("UPDATE folders SET name=? WHERE id=?",(new,root["id"]))
-    db.execute("UPDATE links SET category=? WHERE category=?",(new,old_name)); db.commit()
+    db.execute("UPDATE links SET category=? WHERE category=?",(new,old_name))
+    audit("category_renamed", "category", old_name, {"after": new})
+    db.commit()
     return jsonify({"oldName":old_name,"newName":new})
 
 
 @app.route("/api/categories/<string:name>", methods=["DELETE"])
+@admin_required
 def delete_category(name):
     db=get_db(); root=db.execute("SELECT id FROM folders WHERE name=? AND parent_id IS NULL",(name,)).fetchone()
     if root:
         db.execute("""WITH RECURSIVE tree(id) AS (SELECT id FROM folders WHERE id=? UNION ALL SELECT f.id FROM folders f JOIN tree t ON f.parent_id=t.id)
-                     UPDATE links SET folder_id=NULL,category='Sem categoria',subcategory='' WHERE folder_id IN tree""",(root["id"],))
+                     UPDATE links SET folder_id=NULL,category=?,subcategory='' WHERE folder_id IN tree""",(root["id"], UNCLASSIFIED_CATEGORY))
         db.execute("DELETE FROM folders WHERE id=?",(root["id"],))
-    db.execute("UPDATE links SET category='Sem categoria',subcategory='' WHERE category=?",(name,))
-    db.execute("DELETE FROM subcategories WHERE category=?",(name,)); cur=db.execute("DELETE FROM categories WHERE name=?",(name,)); db.commit()
+    db.execute("UPDATE links SET category=?,subcategory='' WHERE category=?",(UNCLASSIFIED_CATEGORY,name))
+    db.execute("DELETE FROM subcategories WHERE category=?",(name,)); cur=db.execute("DELETE FROM categories WHERE name=?",(name,))
+    audit("category_deleted", "category", name, {"destination": UNCLASSIFIED_CATEGORY})
+    db.commit()
     if not cur.rowcount:return jsonify({"error":"Categoria não encontrada"}),404
-    return jsonify({"deleted":name,"destination":"Sem categoria"})
+    return jsonify({"deleted":name,"destination":UNCLASSIFIED_CATEGORY})
 
 
 @app.route("/api/subcategories", methods=["GET"])
@@ -456,6 +1003,7 @@ def list_subcategories():
 
 
 @app.route("/api/subcategories", methods=["POST"])
+@login_required
 def add_subcategory():
     data=request.get_json() or {}; name=str(data.get("name","")).strip(); category=str(data.get("category","")).strip()
     if not name or not category:return jsonify({"error":"Nome e categoria são obrigatórios"}),400
@@ -465,11 +1013,13 @@ def add_subcategory():
         root=db.execute("SELECT id FROM folders WHERE name=? AND parent_id IS NULL",(category,)).fetchone()
         if not root: return jsonify({"error":"Categoria não encontrada"}),404
         db.execute("INSERT OR IGNORE INTO folders(name,parent_id,created_at) VALUES (?,?,?)",(name,root["id"],int(time.time()*1000)))
+        audit("subcategory_created", "subcategory", cur.lastrowid, {"name": name, "category": category})
         db.commit(); return jsonify({"id":cur.lastrowid,"name":name,"category":category}),201
     except sqlite3.IntegrityError:return jsonify({"error":"Subcategoria já existe nesta categoria"}),409
 
 
 @app.route("/api/subcategories/<int:sub_id>", methods=["PUT"])
+@login_required
 def rename_subcategory(sub_id):
     data=request.get_json() or {}; name=str(data.get("name","")).strip(); db=get_db()
     row=db.execute("SELECT * FROM subcategories WHERE id=?",(sub_id,)).fetchone()
@@ -479,11 +1029,14 @@ def rename_subcategory(sub_id):
     if root:
         folder=db.execute("SELECT id FROM folders WHERE name=? AND parent_id=?",(row["name"],root["id"])).fetchone()
         if folder: db.execute("UPDATE folders SET name=? WHERE id=?",(name,folder["id"]))
-    db.execute("UPDATE links SET subcategory=? WHERE subcategory=? AND category=?",(name,row["name"],row["category"])); db.commit()
+    db.execute("UPDATE links SET subcategory=? WHERE subcategory=? AND category=?",(name,row["name"],row["category"]))
+    audit("subcategory_renamed", "subcategory", sub_id, {"before": row["name"], "after": name})
+    db.commit()
     return jsonify({"id":sub_id,"name":name,"category":row["category"]})
 
 
 @app.route("/api/subcategories/<int:sub_id>", methods=["DELETE"])
+@admin_required
 def delete_subcategory(sub_id):
     db=get_db(); row=db.execute("SELECT * FROM subcategories WHERE id=?",(sub_id,)).fetchone()
     if not row:return jsonify({"error":"Não encontrada"}),404
@@ -492,10 +1045,12 @@ def delete_subcategory(sub_id):
         folder=db.execute("SELECT id FROM folders WHERE name=? AND parent_id=?",(row["name"],root["id"])).fetchone()
         if folder:
             db.execute("""WITH RECURSIVE tree(id) AS (SELECT id FROM folders WHERE id=? UNION ALL SELECT f.id FROM folders f JOIN tree t ON f.parent_id=t.id)
-                         UPDATE links SET folder_id=NULL,category='Sem categoria',subcategory='' WHERE folder_id IN tree""",(folder["id"],))
+                         UPDATE links SET folder_id=NULL,category=?,subcategory='' WHERE folder_id IN tree""",(folder["id"], UNCLASSIFIED_CATEGORY))
             db.execute("DELETE FROM folders WHERE id=?",(folder["id"],))
-    db.execute("UPDATE links SET subcategory='',category='Sem categoria' WHERE subcategory=? AND category=?",(row["name"],row["category"]))
-    db.execute("DELETE FROM subcategories WHERE id=?",(sub_id,)); db.commit(); return jsonify({"deleted":sub_id})
+    db.execute("UPDATE links SET subcategory='',category=? WHERE subcategory=? AND category=?",(UNCLASSIFIED_CATEGORY,row["name"],row["category"]))
+    db.execute("DELETE FROM subcategories WHERE id=?",(sub_id,))
+    audit("subcategory_deleted", "subcategory", sub_id, {"name": row["name"], "category": row["category"]})
+    db.commit(); return jsonify({"deleted":sub_id})
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +1059,8 @@ def delete_subcategory(sub_id):
 @app.route("/api/links", methods=["GET"])
 def list_links():
     db = get_db()
-    rows = db.execute("SELECT id,title,url,category,subcategory,description,created_at,updated_at,folder_id FROM links ORDER BY created_at DESC").fetchall()
+    rows = db.execute("""SELECT id,title,url,category,subcategory,description,created_at,updated_at,folder_id
+                         FROM links WHERE deleted_at IS NULL ORDER BY created_at DESC""").fetchall()
     _, folder_cache = build_folder_cache(db)
     associations = {}
     for r in db.execute("SELECT link_id,folder_id FROM link_folders ORDER BY link_id,folder_id").fetchall():
@@ -551,48 +1107,130 @@ def resolve_folder_id(db, data):
 def create_link():
     data=request.get_json() or {}; title=str(data.get("title","")).strip(); url=str(data.get("url","")).strip()
     if not title or not url:return jsonify({"error":"Título e URL são obrigatórios"}),400
+    if len(title) > 240 or len(url) > 4096 or len(str(data.get("description", ""))) > 4000:
+        return jsonify({"error":"Título, endereço ou descrição excede o limite permitido."}),400
+    lowered_url = url.casefold()
+    if lowered_url.startswith(("javascript:", "data:", "file:")):
+        return jsonify({"error":"Use um endereço HTTP ou HTTPS válido."}),400
     db=get_db()
-    try: folder_id=resolve_folder_id(db,data)
-    except ValueError as e:return jsonify({"error":str(e)}),400
-    cat,sub=sync_legacy_location(db,folder_id)
-    lid=data.get("id") or str(uuid.uuid4()); created=data.get("createdAt") or int(time.time()*1000)
+    actor = current_user()
+    if not actor and not consume_rate_limit("create-link:" + client_ip(), PUBLIC_CREATE_LIMIT, PUBLIC_CREATE_WINDOW_SECONDS):
+        db.commit()
+        response = jsonify({"error":"Limite temporário de inclusões atingido. Aguarde alguns minutos.", "code":"rate_limited"})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(PUBLIC_CREATE_WINDOW_SECONDS)
+        return response
+    
+    if actor:
+        try:
+            folder_id = resolve_folder_id(db, data)
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+    else:
+        # Visitantes não podem escolher categoria ou subcategoria.
+        # Qualquer folderId enviado pelo navegador será ignorado.
+        folder_id = None
+
+    cat, sub = sync_legacy_location(db, folder_id)
+
+
+
+
+    # O servidor é a autoridade dos IDs persistentes. Isso também permite que
+    # clientes HTTP funcionem sem APIs criptográficas exclusivas de HTTPS.
+    lid=str(uuid.uuid4()); created=now_ms()
     db.execute("INSERT INTO links(id,title,url,category,subcategory,description,created_at,folder_id) VALUES (?,?,?,?,?,?,?,?)",(lid,title,url,cat,sub,str(data.get("description","")).strip(),created,folder_id))
     if folder_id:
         db.execute("INSERT OR IGNORE INTO link_folders(link_id,folder_id) VALUES (?,?)", (lid, folder_id))
+    audit("link_created", "link", lid, {"title": title, "category": cat}, actor=actor)
     db.commit()
     return jsonify(link_payload(db,db.execute("SELECT * FROM links WHERE id=?",(lid,)).fetchone())),201
 
 
 @app.route("/api/links/<string:link_id>", methods=["PUT"])
+@login_required
 def update_link(link_id):
     data=request.get_json() or {}; title=str(data.get("title","")).strip(); url=str(data.get("url","")).strip()
     if not title or not url:return jsonify({"error":"Título e URL são obrigatórios"}),400
+    if len(title) > 240 or len(url) > 4096 or len(str(data.get("description", ""))) > 4000:
+        return jsonify({"error":"Título, endereço ou descrição excede o limite permitido."}),400
+    if url.casefold().startswith(("javascript:", "data:", "file:")):
+        return jsonify({"error":"Use um endereço HTTP ou HTTPS válido."}),400
     db=get_db()
     try: folder_id=resolve_folder_id(db,data)
     except ValueError as e:return jsonify({"error":str(e)}),400
     cat,sub=sync_legacy_location(db,folder_id)
-    cur=db.execute("UPDATE links SET title=?,url=?,category=?,subcategory=?,description=?,folder_id=? WHERE id=?",(title,url,cat,sub,str(data.get("description","")).strip(),folder_id,link_id))
+    previous=db.execute("SELECT title,url,category,subcategory,description,folder_id FROM links WHERE id=? AND deleted_at IS NULL",(link_id,)).fetchone()
+    if not previous:return jsonify({"error":"Link não encontrado"}),404
+    cur=db.execute("UPDATE links SET title=?,url=?,category=?,subcategory=?,description=?,folder_id=? WHERE id=? AND deleted_at IS NULL",(title,url,cat,sub,str(data.get("description","")).strip(),folder_id,link_id))
     if not cur.rowcount:return jsonify({"error":"Link não encontrado"}),404
     db.execute("DELETE FROM link_folders WHERE link_id=?", (link_id,))
     if folder_id:
         db.execute("INSERT OR IGNORE INTO link_folders(link_id,folder_id) VALUES (?,?)", (link_id, folder_id))
+    audit("link_updated", "link", link_id, {"before": dict(previous), "title": title, "category": cat})
     db.commit(); return jsonify(link_payload(db,db.execute("SELECT * FROM links WHERE id=?",(link_id,)).fetchone()))
 
 
 @app.route("/api/links/<string:link_id>", methods=["DELETE"])
+@login_required
 def delete_link(link_id):
-    db=get_db(); cur=db.execute("DELETE FROM links WHERE id=?",(link_id,)); db.commit()
+    db=get_db(); row=db.execute("SELECT title,url,category,subcategory FROM links WHERE id=? AND deleted_at IS NULL",(link_id,)).fetchone()
+    if not row:return jsonify({"error":"Link não encontrado"}),404
+    cur=db.execute("UPDATE links SET deleted_at=?,deleted_by=? WHERE id=? AND deleted_at IS NULL",(now_ms(),g.current_user["id"],link_id))
+    audit("link_trashed", "link", link_id, dict(row))
+    db.commit()
     if not cur.rowcount:return jsonify({"error":"Link não encontrado"}),404
-    return jsonify({"deleted":link_id})
+    return jsonify({"trashed":link_id})
+
+
+@app.route("/api/trash/links", methods=["GET"])
+@login_required
+def list_trashed_links():
+    rows = get_db().execute(
+        """SELECT l.id,l.title,l.url,l.category,l.subcategory,l.description,l.created_at,l.updated_at,l.folder_id,
+                  l.deleted_at,l.deleted_by,u.display_name AS deleted_by_name
+           FROM links l LEFT JOIN users u ON u.id=l.deleted_by
+           WHERE l.deleted_at IS NOT NULL ORDER BY l.deleted_at DESC"""
+    ).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.route("/api/trash/links/<string:link_id>/restore", methods=["POST"])
+@login_required
+def restore_trashed_link(link_id):
+    db = get_db()
+    row = db.execute("SELECT title FROM links WHERE id=? AND deleted_at IS NOT NULL", (link_id,)).fetchone()
+    if not row:
+        return jsonify({"error":"Link não encontrado na lixeira."}),404
+    db.execute("UPDATE links SET deleted_at=NULL,deleted_by=NULL WHERE id=?", (link_id,))
+    audit("link_restored", "link", link_id, {"title": row["title"]})
+    db.commit()
+    return jsonify({"restored":link_id})
+
+
+@app.route("/api/trash/links/<string:link_id>", methods=["DELETE"])
+@admin_required
+def purge_trashed_link(link_id):
+    db = get_db()
+    row = db.execute("SELECT title,url,category FROM links WHERE id=? AND deleted_at IS NOT NULL", (link_id,)).fetchone()
+    if not row:
+        return jsonify({"error":"Link não encontrado na lixeira."}),404
+    audit("link_purged", "link", link_id, dict(row))
+    db.execute("DELETE FROM links WHERE id=? AND deleted_at IS NOT NULL", (link_id,))
+    db.commit()
+    return jsonify({"purged":link_id})
 
 
 @app.route("/api/links/bulk-action", methods=["POST"])
+@login_required
 def bulk_link_action():
     data=request.get_json() or {}; action=data.get("action"); ids=[str(x) for x in data.get("ids",[]) if x]
     if not ids:return jsonify({"error":"Nenhum link selecionado"}),400
     db=get_db(); ph=','.join('?' for _ in ids)
     if action=="delete":
-        cur=db.execute("DELETE FROM links WHERE id IN (%s)"%ph,ids); db.commit(); return jsonify({"action":"delete","affected":cur.rowcount})
+        cur=db.execute("UPDATE links SET deleted_at=?,deleted_by=? WHERE deleted_at IS NULL AND id IN (%s)"%ph,[now_ms(),g.current_user["id"],*ids])
+        audit("links_trashed", "link", details={"ids":ids,"affected":cur.rowcount})
+        db.commit(); return jsonify({"action":"delete","affected":cur.rowcount})
     try: fid=resolve_folder_id(db,data)
     except ValueError as e:return jsonify({"error":str(e)}),400
     if not fid:return jsonify({"error":"Destino de pasta obrigatório"}),400
@@ -600,7 +1238,9 @@ def bulk_link_action():
     if action=="move":
         db.execute("DELETE FROM link_folders WHERE link_id IN (%s)"%ph,ids)
         db.executemany("INSERT OR IGNORE INTO link_folders(link_id,folder_id) VALUES (?,?)", [(i,fid) for i in ids])
-        db.execute("UPDATE links SET folder_id=?,category=?,subcategory=? WHERE id IN (%s)"%ph,[fid,cat,sub,*ids]); db.commit()
+        db.execute("UPDATE links SET folder_id=?,category=?,subcategory=? WHERE id IN (%s)"%ph,[fid,cat,sub,*ids])
+        audit("links_moved", "link", details={"ids": ids, "folderId": fid})
+        db.commit()
         _, folder_cache = build_folder_cache(db)
         refreshed=[link_payload(db,r,folder_cache) for r in db.execute("SELECT * FROM links WHERE id IN (%s)"%ph,ids).fetchall()]
         return jsonify({"action":"move","affected":len(ids),"folderId":fid,"category":cat,"subcategory":sub,"path":folder_path(db,fid),"links":refreshed})
@@ -608,6 +1248,7 @@ def bulk_link_action():
         # Copiar significa adicionar uma nova classificação ao mesmo Link, sem duplicar o registro.
         existing={r[0] for r in db.execute("SELECT link_id FROM link_folders WHERE folder_id=? AND link_id IN (%s)"%ph,[fid,*ids]).fetchall()}
         db.executemany("INSERT OR IGNORE INTO link_folders(link_id,folder_id) VALUES (?,?)", [(i,fid) for i in ids])
+        audit("links_copied", "link", details={"ids": ids, "folderId": fid, "affected": len(ids)-len(existing)})
         db.commit()
         refreshed=[link_payload(db,r) for r in db.execute("SELECT * FROM links WHERE id IN (%s)"%ph,ids).fetchall()]
         return jsonify({"action":"copy","affected":len(ids)-len(existing),"folderId":fid,"category":cat,"subcategory":sub,"path":folder_path(db,fid),"links":refreshed})
@@ -615,6 +1256,7 @@ def bulk_link_action():
 
 
 @app.route("/api/links/import", methods=["POST"])
+@login_required
 def import_links():
     data=request.get_json() or {}; new_links=data.get("links",[]); cats=data.get("categories",[]); subs=data.get("subcategories",[])
     if not new_links:return jsonify({"error":"Nenhum link enviado"}),400
@@ -628,13 +1270,14 @@ def import_links():
         if root: db.execute("INSERT OR IGNORE INTO folders(name,parent_id,created_at) VALUES (?,?,?)",(sub["name"],root["id"],now))
     inserted=0
     for lnk in new_links:
-        lid=lnk.get("id") or str(uuid.uuid4()); created=lnk.get("createdAt") or now
+        lid=str(uuid.uuid4()); created=lnk.get("createdAt") or now
         try:
             fid=resolve_folder_id(db,lnk); cat,sub=sync_legacy_location(db,fid)
             db.execute("INSERT OR IGNORE INTO links(id,title,url,category,subcategory,description,created_at,folder_id) VALUES (?,?,?,?,?,?,?,?)",(lid,lnk.get("title",""),lnk.get("url",""),cat,sub,lnk.get("description",""),created,fid))
             if fid: db.execute("INSERT OR IGNORE INTO link_folders(link_id,folder_id) VALUES (?,?)", (lid, fid))
             inserted+=1
         except Exception: pass
+    audit("links_imported", "link", details={"imported": inserted})
     db.commit(); return jsonify({"imported":inserted})
 
 

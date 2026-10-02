@@ -1,8 +1,27 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#059669" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem('chartlink.theme');
+          const preference = saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system';
+          const resolved = preference === 'system'
+            ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+            : preference;
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.dataset.themePreference = preference;
+          document.documentElement.style.colorScheme = resolved;
+          document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolved === 'dark' ? '#111315' : '#059669');
+        } catch {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/chartlink-favicon.svg" />
     <title>ChartLink Manager</title>
   </head>
   <body>
@@ -10,4 +29,3 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

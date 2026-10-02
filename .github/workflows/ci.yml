@@ -24,20 +24,25 @@ jobs:
           cat > .env <<'ENV'
           CHARTLINK_DATA_DIR=${{ runner.temp }}/chartlink-data
           CHARTLINK_BACKUP_DIR=${{ runner.temp }}/chartlink-backups
+          CHARTLINK_SECRET_KEY=ci-only-secret-key-that-is-not-used-in-production
           CHARTLINK_BIND_IP=127.0.0.1
           CHARTLINK_PORT=8080
           ENV
       - name: Validar containers e persistência após reinício
         run: |
+          sh scripts/chartlink.sh build
           sh scripts/chartlink.sh init-empty
           sh scripts/chartlink.sh start
           python - <<'PYTEST'
-          import json, urllib.request
+          import http.cookiejar, json, urllib.request
           base='http://127.0.0.1:8080'
-          assert b'<div id="root">' in urllib.request.urlopen(base).read()
+          opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          assert b'<div id="root">' in opener.open(base).read()
+          auth=json.load(opener.open(base+'/api/auth/session'))
           body=json.dumps({'title':'CI persistence','url':'https://example.org'}).encode()
-          req=urllib.request.Request(base+'/api/links',data=body,headers={'Content-Type':'application/json'})
-          assert urllib.request.urlopen(req).status==201
+          req=urllib.request.Request(base+'/api/links',data=body,headers={
+              'Content-Type':'application/json', 'X-CSRF-Token':auth['csrfToken']})
+          assert opener.open(req).status==201
           PYTEST
           docker compose restart api
           docker compose up -d --wait
@@ -47,6 +52,20 @@ jobs:
           assert any(row['title']=='CI persistence' for row in rows)
           PYTEST
           sh scripts/chartlink.sh backup
+      - name: Exportar imagens sem banco de dados
+        run: |
+          mkdir -p "${{ runner.temp }}/chartlink-images"
+          docker image save --output "${{ runner.temp }}/chartlink-images/opa-chartlink-images.tar" opa-chartlink-api:1.0.8 opa-chartlink-web:1.0.8
+          cd "${{ runner.temp }}/chartlink-images"
+          sha256sum opa-chartlink-images.tar > SHA256SUMS
+      - name: Disponibilizar imagens linux-amd64
+        uses: actions/upload-artifact@v4
+        with:
+          name: opa-chartlink-1.0.8-linux-amd64
+          path: ${{ runner.temp }}/chartlink-images/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
       - name: Logs em caso de erro
         if: failure()
         run: docker compose logs --no-color --tail 100

@@ -9,11 +9,61 @@ function compareTitles(a: ChartLink, b: ChartLink): number {
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
+function rootCategory(link: ChartLink): string {
+  return link.folderPaths[0]?.[0] || link.folderPath[0] || link.category || '';
+}
+
+function primaryTag(link: ChartLink): string {
+  return link.folderTagItems.find(item => item.level === 1)?.name
+    || link.folderPaths[0]?.[1]
+    || link.folderPath[1]
+    || link.subcategory.split('/')[0]?.trim()
+    || 'Sem tag primária';
+}
+
 /** Ordenação natural por título, sem alterar a coleção recebida. */
 export function sortLinks(links: readonly ChartLink[], order: SortOrder): ChartLink[] {
   return [...links].sort((a, b) => {
     if (order === 'az') return compareTitles(a, b);
+   
     if (order === 'za') return -compareTitles(a, b);
+
+    if (order === 'category-az') {
+      return titleCollator.compare(rootCategory(a), rootCategory(b)) || compareTitles(a, b);
+    }
+    
+    if (order === 'category-za') {
+      return (
+        titleCollator.compare(rootCategory(b), rootCategory(a))
+        || compareTitles(a, b)
+      );
+    }
+
+    if (order === 'primary-tag') {
+      return titleCollator.compare(primaryTag(a), primaryTag(b)) || compareTitles(a, b);
+    }
+
+    if (order === 'recent-edited') {
+      const aDate =
+        typeof a.updatedAt === 'number' && Number.isFinite(a.updatedAt)
+          ? a.updatedAt
+          : Number.isFinite(a.createdAt)
+            ? a.createdAt
+            : -Infinity;
+
+      const bDate =
+        typeof b.updatedAt === 'number' && Number.isFinite(b.updatedAt)
+          ? b.updatedAt
+          : Number.isFinite(b.createdAt)
+            ? b.createdAt
+            : -Infinity;
+
+      return (
+        (aDate === bDate ? 0 : aDate > bDate ? -1 : 1)
+        || compareTitles(a, b)
+      );
+    }
+
     const aDate = Number.isFinite(a.createdAt) ? a.createdAt : -Infinity;
     const bDate = Number.isFinite(b.createdAt) ? b.createdAt : -Infinity;
     return (aDate === bDate ? 0 : aDate > bDate ? -1 : 1) || compareTitles(a, b);

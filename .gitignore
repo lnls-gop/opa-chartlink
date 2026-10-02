@@ -19,6 +19,9 @@ coverage/
 *.backup
 *.bak
 *.zip
+*.tar
+*.tar.gz
+chartlink-imagens-*/
 data/
 backups/
 exports/

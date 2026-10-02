@@ -1,33 +1,45 @@
-# ChartLink 1.0.0
+# ChartLink 21 — pacote de produção 1.0.8
 
-Aplicação para organizar links, dashboards e ferramentas por categorias. Frontend React 18, TypeScript, Vite 4 e Tailwind CSS 3; API Flask e SQLite.
+Organizador de links e dashboards: React 18, TypeScript, Vite 4, Tailwind CSS 3, Flask e SQLite. Esta revisão adiciona autenticação local, autorização por perfil, proteção CSRF, auditoria e lixeira recuperável.
 
-## GitHub e execução contínua
+## Comece aqui
 
-O GitHub armazena e versiona o código. A aplicação é executada em um servidor Linux da sua rede, com Docker Compose. Depois da instalação, você pode fechar o terminal e o VS Code: Docker mantém os serviços ativos e os inicia novamente quando o servidor reinicia, desde que o serviço Docker esteja habilitado. O servidor precisa permanecer ligado e conectado à rede.
-
-- [Instalar e operar em produção](docs/PRODUCAO.md)
-- [Publicar o código no GitHub](docs/GITHUB.md)
-- [Alterações da versão e validação](docs/RELEASE_1.0.0.md)
+- [Instalação na fac6, passo a passo](docs/FAC6.md)
+- [Enviar o código para lnls-gop/opa-chartlink](docs/GITHUB.md)
+- [Operação, backups e atualizações](docs/PRODUCAO.md)
+- [Autenticação local e criação do primeiro administrador](docs/AUTENTICACAO_LOCAL.md)
+- [Alterações de segurança da revisão 1.0.8](docs/RELEASE_1.0.8.md)
+- [Correções de contraste do tema escuro na revisão 1.0.7](docs/RELEASE_1.0.7.md)
+- [Tema claro, escuro e automático da revisão 1.0.6](docs/RELEASE_1.0.6.md)
+- [Responsividade e árvore de categorias da revisão 1.0.5](docs/RELEASE_1.0.5.md)
+- [Alterações visuais da revisão 1.0.4](docs/RELEASE_1.0.4.md)
+- [Alterações da área de links não classificados](docs/RELEASE_1.0.3.md)
+- [Correção para uso via HTTP por IP](docs/RELEASE_1.0.2.md)
+- [Alterações e limites da validação 1.0.1](docs/RELEASE_1.0.1.md)
 - [Histórico da interface](MELHORIAS_INTERFACE.md)
 
-## Estrutura
+O GitHub guarda o código e pode compilar as imagens. A aplicação roda na fac6. Depois de iniciada em segundo plano, não depende do terminal nem do VS Code. O servidor precisa permanecer ligado, conectado à rede e com Docker ativo. Serviços parados manualmente precisam ser iniciados novamente.
+
+## Separação entre código e dados
+
+Este ZIP contém código e configuração, não imagens Docker prontas. Não inclui banco, backups, ambientes virtuais, node_modules, CSVs de dados nem o catálogo estático de URLs privadas. O banco atual deve ser importado separadamente. A importação de favoritos usa os links já existentes na instalação como referência e mantém as regras de classificação por subsistema.
 
 | Caminho | Função |
 | --- | --- |
-| `src/` | Interface finalizada, busca, árvore, cards e importação |
-| `backend/` | API, migração SQLite e entrada WSGI |
-| `compose.yaml` | Nginx e Gunicorn, volumes e reinício automático |
-| `deploy/` | Imagens Docker e configurações de produção |
-| `scripts/chartlink.sh` | Iniciar, parar, importar banco, atualizar e fazer backup |
-| `scripts/database.py` | Snapshot consistente, validação e proteção contra sobrescrita |
-| `tests/` | Testes com dados artificiais, sem banco da instalação |
+| src/ | Interface |
+| backend/ | API e migrações SQLite |
+| compose.yaml | Execução com imagens locais, volumes e limites de recursos |
+| compose.build.yaml | Configuração adicional para compilar imagens |
+| deploy/ | Dockerfiles, Gunicorn e Nginx |
+| scripts/chartlink.sh | Compilação, transporte de imagens e operação |
+| scripts/database.py | Importação e snapshots consistentes, sem sobrescrever destino |
+| tests/ | Testes com dados artificiais |
 
-Este pacote não contém `chartlink.db`, backups, ambientes virtuais, `node_modules`, CSVs de dados ou URLs do catálogo privado. A importação de favoritos consulta os links já existentes na instalação como referência e mantém as regras de classificação por subsistema. Os dados entram pelo banco importado no servidor, não pelo GitHub.
+Os dados de produção ficam em diretórios locais externos ao código. Não coloque o banco SQLite ativo em compartilhamento de rede.
 
 ## Desenvolvimento local
 
-Requer Node 22 e Python 3.12 para reproduzir os ambientes das imagens. As versões do frontend permanecem fixadas no lockfile.
+Para reproduzir as imagens: Node 22 e Python 3.12. O Python 3.6.8 da linac-opi2 não precisa ser atualizado para executar a aplicação dentro do Docker na fac6.
 
 ```bash
 npm ci --include=dev
@@ -42,9 +54,9 @@ Em outro terminal:
 npm run dev
 ```
 
-O backend de desenvolvimento usa `backend/chartlink.db`, com caminho absoluto independente da pasta do terminal. Para outro arquivo, configure `CHARTLINK_DATABASE`. Nunca aponte os testes para o banco de produção.
+O backend de desenvolvimento usa backend/chartlink.db. Para outro arquivo, configure CHARTLINK_DATABASE e CHARTLINK_SECRET_KEY. Nunca aponte os testes para o banco real.
 
-## Verificação
+## Testes
 
 ```bash
 npm run build
@@ -52,4 +64,4 @@ npm test
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-O workflow do GitHub executa essas verificações e constrói os containers com um banco temporário, conferindo persistência após reiniciar a API. Ele não implanta nada no seu servidor.
+O workflow do GitHub também testa containers e persistência com um banco temporário. Somente após sucesso exporta imagens linux-amd64 como artefato. Não publica a aplicação nem envia o banco para o servidor. Consulte as limitações locais nas notas da versão.

@@ -1,59 +1,59 @@
-# Publicar ChartLink 1.0.0 no GitHub
+# Enviar para lnls-gop/opa-chartlink
 
-## O que publicar
+Use sua conta com acesso concedido pela organização. Não envie o ZIP como único arquivo: o repositório deve conter package.json, src/, backend/, compose.yaml e os demais arquivos diretamente na raiz.
 
-Use esta pasta limpa de código. Não envie o ZIP antigo completo, `node_modules`, ambientes virtuais, banco, backups, CSVs ou exportações. O `.gitignore` já exclui esses itens. O pacote também remove o catálogo estático com URLs internas: o classificador usa os links que a própria API carregou do banco.
+Não inclua banco, backups, .env real, senhas, tokens, CSVs internos, node_modules, .venv ou imagens TAR. O pacote já contém .gitignore e .dockerignore; revise os arquivos antes do commit. Não use git add -f para contornar as exclusões.
 
-Crie um repositório chamado `chartlink` na conta ou organização apropriada. A sugestão inicial é **Private**, por se tratar de uma ferramenta interna. Crie o repositório vazio, sem README, licença ou gitignore automáticos, porque os arquivos de configuração já estão neste projeto.
+## Se o repositório já tem arquivos
 
-## Primeiro envio
+Não substitua o histórico. Clone o repositório e crie uma branch:
 
-No terminal, entre na pasta deste pacote que contém `package.json` e `compose.yaml`:
+```bash
+git clone https://github.com/lnls-gop/opa-chartlink.git
+cd opa-chartlink
+git switch -c deploy/chartlink-21
+```
+
+Copie o conteúdo da pasta ChartLink_21_producao para esse clone, incluindo os arquivos ocultos de configuração, preservando a pasta .git. Compare as alterações. Se houver trabalho recente de colegas, integre-o antes de continuar.
+
+```bash
+git status --short
+git diff
+git add .
+git diff --cached --stat
+git diff --cached
+git commit -m "Prepara ChartLink 21 para Docker na fac6"
+git push -u origin deploy/chartlink-21
+```
+
+Abra um pull request no GitHub e siga as regras de revisão da organização. Não use force-push.
+
+## Somente se o repositório estiver vazio
+
+Dentro da pasta extraída ChartLink_21_producao, e somente se ela ainda não for um repositório Git:
 
 ```bash
 git init -b main
 git add .
-git status --short
 git diff --cached --stat
-```
-
-Confira a lista preparada: não deve haver banco, dados da instalação ou ambientes locais. O pacote não contém histórico Git prévio.
-
-Se o Git solicitar sua identidade, configure nome e e-mail **neste repositório**, usando seus dados ou o endereço noreply do GitHub:
-
-```bash
-git config user.name "SEU NOME"
-git config user.email "SEU EMAIL DO GITHUB"
-```
-
-Crie o commit:
-
-```bash
-git commit -m "Release inicial do ChartLink 1.0.0"
-```
-
-Copie a URL SSH ou HTTPS exibida pelo GitHub. Substitua os marcadores `SUA_CONTA` e `chartlink` pelo destino real:
-
-```bash
-git remote add origin https://github.com/SUA_CONTA/chartlink.git
+git diff --cached
+git commit -m "Adiciona ChartLink 21 com implantação Docker"
+git remote add origin https://github.com/lnls-gop/opa-chartlink.git
 git push -u origin main
 ```
 
-O envio exige autenticação da sua máquina no GitHub. Use o gerenciador de credenciais, chave SSH configurada ou `gh auth login` se já tiver o GitHub CLI. Não coloque tokens no código nem na URL do remoto.
+Se o Git solicitar identidade, configure seu nome e e-mail institucionais nessa pasta. Autentique pelo método aprovado pela organização. Nunca cole tokens no código ou na URL do remote. Se o push for negado ou indicar histórico remoto existente, pare e confira permissões/histórico; não force.
 
-Depois que o workflow em **Actions** concluir com sucesso, marque a versão:
+## Gerar imagens pelo GitHub Actions
 
-```bash
-git tag -a v1.0.0 -m "ChartLink 1.0.0"
-git push origin v1.0.0
-```
+Após o envio, abra a aba Actions e o workflow "Verificar ChartLink". Ele instala dependências, testa o código, compila imagens, testa a persistência e disponibiliza o artefato:
 
-Se o repositório já existir e tiver histórico, clone-o primeiro e copie este código para ele. Não use force push para resolver diferenças de histórico.
+opa-chartlink-1.0.8-linux-amd64
 
-## O que acontece depois do push
+Baixe apenas o artefato da execução bem-sucedida da revisão que você aprovou. Ele contém opa-chartlink-images.tar e SHA256SUMS, sem seu banco de dados. A retenção solicitada é de três dias; políticas e cotas da organização podem limitar o recurso.
 
-O workflow verifica TypeScript, frontend, API, importação/backup e a execução dos containers com dados artificiais. O teste de containers escreve um link de exemplo, reinicia a API e confere a persistência. O workflow não publica os dados e não acessa seu servidor.
+Confirme com TI se código e builds podem ser processados em runners hospedados no GitHub. Se não puderem, use uma máquina de compilação autorizada conforme FAC6.md. Permissões ou políticas bloqueadas devem ser resolvidas com a organização, sem contornar controles.
 
-O código no GitHub não coloca automaticamente a API Flask em execução. Siga [PRODUCAO.md](PRODUCAO.md) no servidor Linux para disponibilizar a aplicação à equipe.
+As imagens do workflow são para Linux x86_64/amd64. Confira uname -m na fac6 antes de utilizá-las. O workflow não altera o container kind_newton, não acessa a fac6 e não faz implantação automática.
 
-Referência: [GitHub — adicionar código local a um repositório](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github).
+Referência dos parâmetros de artefatos: [actions/upload-artifact](https://github.com/actions/upload-artifact).

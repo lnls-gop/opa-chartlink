@@ -75,7 +75,8 @@ class ProductionTests(unittest.TestCase):
             client = server.app.test_client()
             self.assertEqual(client.get("/api/health").status_code, 200)
             self.assertFalse(server.app.debug)
-            client.post("/api/links", json={"title": "Persisted", "url": "https://example.org"})
+            csrf = client.get('/api/auth/session').get_json()['csrfToken']
+            client.post("/api/links", json={"title": "Persisted", "url": "https://example.org"}, headers={'X-CSRF-Token': csrf})
             server.init_db()
             self.assertEqual(client.get("/api/links").get_json()[0]["title"], "Persisted")
             self.assertNotIn("Access-Control-Allow-Origin", client.get("/api/links", headers={"Origin": "https://other.example"}).headers)

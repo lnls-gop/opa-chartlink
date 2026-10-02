@@ -32,4 +32,11 @@ export interface Subcategory {
 }
 
 export type ViewMode = 'grid' | 'list';
-export type SortOrder = 'recent' | 'az' | 'za';
+export type SortOrder =
+  | 'recent'
+  | 'recent-edited'
+  | 'az'
+  | 'za'
+  | 'category-az'
+  | 'category-za'
+  | 'primary-tag';

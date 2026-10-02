@@ -6,17 +6,28 @@ import { AnimatedSidebar, clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from './com
 import { LinkCollection } from './components/LinkCollection';
 import { FolderColorDialog } from './components/FolderColorDialog';
 import { CategoryFolderIcon } from './components/CategoryFolderIcon';
+import { FolderActionsMenu } from './components/FolderActionsMenu';
 import { LinkInfoDialog } from './components/LinkInfoDialog';
 import { useLinkSearch } from './hooks/useLinkSearch';
 import { LinkSearchInput } from './components/LinkSearchInput';
+import { ThemeSelector } from './components/ThemeSelector';
+import { AuthDialog } from './components/AuthDialog';
+import { UserMenu } from './components/UserMenu';
+import { TrashDialog } from './components/TrashDialog';
+import { AdminUsersDialog } from './components/AdminUsersDialog';
+import { useTheme } from './hooks/useTheme';
 import { scopeLinks, sortLinks } from './utils/linkView';
 import { resolveLinkUrl } from './utils/linkUrl';
+import { createTemporaryId } from './utils/temporaryId';
+import { apiRequest as fetch, loadAuthSession, updateAuthSession } from './api/client';
+import type { AuthSession } from './types/auth';
+import { UNCLASSIFIED_CATEGORY, UNCLASSIFIED_CATEGORY_COLOR } from './constants/categories';
 import {
   Plus, Trash2, ExternalLink, LayoutGrid, List,
   Link as LinkIcon, X, Edit2, Settings, Check,
   Upload, FileText, AlertCircle,
   Tag, FolderOpen, Folder, CheckSquare, Square, ArrowRightLeft,
-  ChevronRight, ChevronDown, Globe2, FolderPlus, Send, CopyPlus, Palette,
+  ChevronRight, ChevronDown, FolderPlus, CopyPlus, Send,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { parseBookmarkHtml, type ParsedBookmark } from './bookmarks/bookmarkParser';
@@ -48,23 +59,25 @@ function rowToLink(row: Record<string, unknown>): ChartLink {
 const API = '/api';
 
 
-const folderColor = (level: number, rootName?: string, customColor?: string) => {
+const folderColor = (level: number, rootName?: string, customColor?: string, dark = false) => {
   const color = customColor || categoryColor(rootName);
   const isColored = customColor !== undefined || color !== '#000000';
+  const foreground = dark ? '#f4f4f5' : '#000000';
   return {
     color,
     badgeStyle: {
-      color: '#000000',
-      backgroundColor: isColored ? hexToRgba(color, 0.13) : '#f4f4f5',
+      color: foreground,
+      backgroundColor: isColored ? hexToRgba(color, dark ? 0.3 : 0.13) : (dark ? '#34383d' : '#f4f4f5'),
     },
-    tagStyle: { color: '#000000', backgroundColor: hexToRgba(color, 0.16), borderColor: hexToRgba(color, 0.55) },
+    tagStyle: { color: foreground, backgroundColor: hexToRgba(color, dark ? 0.28 : 0.16), borderColor: hexToRgba(color, 0.55) },
     pillActiveStyle: {
-      backgroundColor: hexToRgba(color, 0.22),
-      color: '#000000',
+      backgroundColor: hexToRgba(color, dark ? 0.34 : 0.22),
+      border: '1.5px solid ' + hexToRgba(color, dark ? 0.75 : 0.5),
+      color: foreground,
     },
     pillInactiveStyle: {
       borderColor: isColored ? hexToRgba(color, 0.5) : '#d4d4d8',
-      color: '#000000',
+      color: foreground,
     },
   };
 };
@@ -74,9 +87,19 @@ const folderColor = (level: number, rootName?: string, customColor?: string) => 
 // ---------------------------------------------------------------------------
 
 interface ImportPreviewItem extends ClassifiedBookmark {
-  id: string;
+  temporaryId: string;
   description: string;
   createdAt: number;
+}
+
+interface LinkImportPayload {
+  title: string;
+  url: string;
+  category: string;
+  subcategory: string;
+  description: string;
+  createdAt: number;
+  folderId: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,12 +107,34 @@ interface ImportPreviewItem extends ClassifiedBookmark {
 // ---------------------------------------------------------------------------
 
 function App() {
+  const { preference: themePreference, resolved: resolvedTheme, setPreference: setThemePreference } = useTheme();
   const [links, setLinks]           = useState<ChartLink[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
   const [folders, setFolders] = useState<FolderNode[]>([]);
   const folderById = useMemo(() => new Map(folders.map(folder => [folder.id, folder])), [folders]);
+  const categoryCount = useMemo(() => folders.filter(folder => folder.parent_id === null).length, [folders]);
+  const rootCategoryNames = useMemo(
+  () => folders
+    .filter(folder => folder.parent_id === null)
+    .map(folder => folder.name)
+    .sort((a, b) =>
+      a.localeCompare(b, 'pt-BR', {
+        sensitivity: 'base',
+        numeric: true,
+      }),
+    ),
+  [folders],
+);
+  const subcategoryCount = folders.length - categoryCount;
   const [loading, setLoading]       = useState(true);
+  const [auth, setAuth] = useState<AuthSession | null>(null);
+  const canAssignLinkCategory =
+  auth?.permissions.assignLinkCategory === true;
+  const [isLoginOpen, setIsLoginOpen] = useState(false);
+  const [isPasswordOpen, setIsPasswordOpen] = useState(false);
+  const [isTrashOpen, setIsTrashOpen] = useState(false);
+  const [isUsersOpen, setIsUsersOpen] = useState(false);
 
   // Filtros
   const [filterCategory, setFilterCategory]       = useState<string>('Todos');
@@ -158,6 +203,8 @@ function App() {
 
   // Form de link
   const [editingLink, setEditingLink] = useState<ChartLink | null>(null);
+  const [linkFormError, setLinkFormError] = useState<string | null>(null);
+  const [linkSaving, setLinkSaving] = useState(false);
   const [formData, setFormData] = useState({
     title: '', url: '', category: 'Geral', subcategory: '', description: '', folderId: null as number | null,
   });
@@ -169,7 +216,9 @@ function App() {
   useEffect(() => {
     const fetchAll = async () => {
       try {
-        const [linksRes, catsRes, subsRes, foldersRes] = await Promise.all([
+        const authSession = await loadAuthSession();
+        setAuth(authSession);
+          const [linksRes, catsRes, subsRes, foldersRes] = await Promise.all([
           fetch(API + '/links'),
           fetch(API + '/categories'),
           fetch(API + '/subcategories'),
@@ -189,6 +238,37 @@ function App() {
     };
     fetchAll();
   }, []);
+
+  useEffect(() => {
+    const requestLogin = () => setIsLoginOpen(true);
+    const requestPasswordChange = () => setIsPasswordOpen(true);
+    window.addEventListener('chartlink:auth-required', requestLogin);
+    window.addEventListener('chartlink:password-change-required', requestPasswordChange);
+    return () => {
+      window.removeEventListener('chartlink:auth-required', requestLogin);
+      window.removeEventListener('chartlink:password-change-required', requestPasswordChange);
+    };
+  }, []);
+
+  const acceptAuthSession = (next: AuthSession) => {
+    setAuth(next);
+    setIsLoginOpen(false);
+    };
+
+  const requireAuthenticated = () => {
+    if (auth?.authenticated) return true;
+    setIsLoginOpen(true);
+    return false;
+  };
+
+  const logout = async () => {
+    const response = await fetch(API + '/auth/logout', { method: 'POST' });
+    if (!response.ok) return;
+    const next = updateAuthSession(await response.json() as AuthSession);
+    setAuth(next);
+    setSelectedLinkIds(new Set());
+    setIsTrashOpen(false); setIsUsersOpen(false); setIsPasswordOpen(false);
+  };
 
   const saveFolderColor = async (color: string | null) => {
     if (!colorFolder) throw new Error('Pasta não encontrada.');
@@ -306,6 +386,7 @@ function App() {
   const clearSelection = () => setSelectedLinkIds(new Set());
 
   const openNewFolder = (parentId: number | null) => {
+    if (!requireAuthenticated()) return;
     setFolderParentId(parentId);
     setNewFolderName('');
     setIsFolderModalOpen(true);
@@ -320,8 +401,27 @@ function App() {
       body: JSON.stringify({ name, parentId: folderParentId }),
     });
     if (!res.ok) { const err = await res.json().catch(() => ({})); alert(err.error || 'Não foi possível criar a categoria/subcategoria.'); return; }
-    const created = await res.json();
-    setFolders(prev => [...prev, created]);
+  const created = await res.json() as FolderNode;
+
+  setFolders(prev => [...prev, created]);
+
+  if (folderParentId === null) {
+    setCategories(prev => {
+      if (prev.includes(created.name)) {
+        return prev;
+      }
+
+    return [...prev, created.name].sort((a, b) =>
+      a.localeCompare(b, 'pt-BR', {
+        sensitivity: 'base',
+        numeric: true,
+      }),
+    );
+  });
+
+  setActiveCatTab(created.name);
+}
+  
     setExpandedFolders(prev => { const next = new Set(prev); if (folderParentId !== null) next.add('folder:' + folderParentId); return next; });
     setIsFolderModalOpen(false);
     setNewFolderName('');
@@ -338,12 +438,40 @@ function App() {
 
   const openLinkInFolder = (folderId: number) => {
     setEditingLink(null);
-    const folder = folders.find(f => f.id === folderId);
-    const category = folder?.path[0] || categories[0] || 'Geral';
+    setLinkFormError(null);
+
+    if (!canAssignLinkCategory) {
+      setFormData({
+        title: '',
+        url: '',
+        category: UNCLASSIFIED_CATEGORY,
+        subcategory: '',
+        description: '',
+        folderId: null,
+      });
+
+      setIsModalOpen(true);
+      return;
+    }
+
+    const folder = folders.find(item => item.id === folderId);
+    const category =
+      folder?.path[0] || categories[0] || UNCLASSIFIED_CATEGORY;
     const subcategory = folder?.path[1] || '';
-    setFormData({ title: '', url: '', category, subcategory, description: '', folderId });
+
+    setFormData({
+      title: '',
+      url: '',
+      category,
+      subcategory,
+      description: '',
+      folderId,
+    });
+
     setIsModalOpen(true);
   };
+
+
 
   // -------------------------------------------------------------------------
   // Share
@@ -381,7 +509,9 @@ function App() {
 
   const handleAddOrEdit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!formData.title || !formData.url) return;
+    if (!formData.title || !formData.url || linkSaving) return;
+    setLinkFormError(null);
+    setLinkSaving(true);
     try {
       if (editingLink) {
         const res = await fetch(API + '/links/' + editingLink.id, {
@@ -389,18 +519,20 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formData),
         });
-        if (!res.ok) throw new Error();
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || 'Não foi possível atualizar o link.');
+        }
         const updated = rowToLink(await res.json());
         setLinks(prev => prev.map(l => l.id === updated.id ? updated : l));
       } else {
         const payload = {
-          id: crypto.randomUUID(),
           title: formData.title,
           url: formData.url,
-          category: formData.category,
-          subcategory: formData.subcategory,
+          category: canAssignLinkCategory ? formData.category : UNCLASSIFIED_CATEGORY,
+          subcategory: canAssignLinkCategory ? formData.subcategory : '',
           description: formData.description,
-          folderId: formData.folderId,
+          folderId: canAssignLinkCategory ? formData.folderId : null,
           createdAt: Date.now(),
         };
         const res = await fetch(API + '/links', {
@@ -408,12 +540,20 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error();
+        if (!res.ok) {
+          const response = await res.json().catch(() => ({}));
+          throw new Error(response.error || 'Não foi possível adicionar o link.');
+        }
         const created = rowToLink(await res.json());
         setLinks(prev => [created, ...prev]);
       }
       closeModal();
-    } catch (e) { console.error(e); }
+    } catch (error) {
+      console.error(error);
+      setLinkFormError(error instanceof Error ? error.message : 'Não foi possível salvar o link.');
+    } finally {
+      setLinkSaving(false);
+    }
   };
 
   const confirmDelete = async () => {
@@ -438,7 +578,8 @@ function App() {
 
   const bulkDelete = async () => {
     if (!selectedCount) return;
-    if (!window.confirm(`Excluir ${selectedCount} link${selectedCount === 1 ? '' : 's'} selecionado${selectedCount === 1 ? '' : 's'}? Esta ação não pode ser desfeita.`)) return;
+    if (!requireAuthenticated()) return;
+    if (!window.confirm(`Enviar ${selectedCount} link${selectedCount === 1 ? '' : 's'} selecionado${selectedCount === 1 ? '' : 's'} para a lixeira?`)) return;
     const ids = Array.from(selectedLinkIds);
     const res = await fetch(API + '/links/bulk-action', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -488,6 +629,7 @@ function App() {
   };
 
   const openCopyForLinks = (ids: string[]) => {
+    if (!requireAuthenticated()) return;
     const initialFolder = selectedFolderId ?? folders.find(f => f.parent_id === null)?.id ?? null;
     const initial = folders.find(f => f.id === initialFolder);
     setBulkMoveMode('copy');
@@ -558,6 +700,8 @@ function App() {
   };
 
   const openModal = (link?: ChartLink) => {
+    if (link && !requireAuthenticated()) return;
+    setLinkFormError(null);
     if (link) {
       setEditingLink(link);
       setFormData({
@@ -566,18 +710,22 @@ function App() {
       });
     } else {
       setEditingLink(null);
+      const destination =
+  selectedFolderId !== null && canAssignLinkCategory
+    ? folderById.get(selectedFolderId)
+    : undefined;      
       setFormData({
         title: '', url: '',
-        category: filterCategory !== 'Todos' ? filterCategory : (categories[0] || 'Geral'),
-        subcategory: filterSubcategory !== 'Todas' ? filterSubcategory : '',
+        category: canAssignLinkCategory ? destination?.path[0] || UNCLASSIFIED_CATEGORY : UNCLASSIFIED_CATEGORY, 
+        subcategory: canAssignLinkCategory ? destination?.path[1] || '' : '',
         description: '',
-        folderId: selectedFolderId,
+        folderId: canAssignLinkCategory ? selectedFolderId : null,
       });
     }
     setIsModalOpen(true);
   };
 
-  const closeModal = () => { setIsModalOpen(false); setEditingLink(null); };
+  const closeModal = () => { setIsModalOpen(false); setEditingLink(null); setLinkFormError(null); };
 
   // -------------------------------------------------------------------------
   // CRUD Categorias
@@ -586,8 +734,8 @@ function App() {
   const addCategory = async (e: FormEvent) => {
     e.preventDefault();
     const name = newCategoryName.trim();
-    if (!name || categories.includes(name)) return;
-    const res = await fetch(API + '/categories', {
+    if (!name || rootCategoryNames.includes(name)) return;
+      const res = await fetch(API + '/categories', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name }),
@@ -603,12 +751,12 @@ function App() {
   const deleteCategory = async (cat: string) => {
     const count = links.filter(l => l.category === cat).length;
     const message = count
-      ? `Excluir "${cat}"? ${count} link${count === 1 ? '' : 's'} ficará${count === 1 ? '' : 'ão'} em "Sem categoria". Nenhum link será transferido para outra categoria.`
+      ? `Excluir "${cat}"? ${count} link${count === 1 ? '' : 's'} ficará${count === 1 ? '' : 'ão'} em "${UNCLASSIFIED_CATEGORY}". Nenhum link será transferido para outra categoria.`
       : `Excluir "${cat}"?`;
     if (!window.confirm(message)) return;
     const res = await fetch(API + '/categories/' + encodeURIComponent(cat), { method: 'DELETE' });
     if (!res.ok) return;
-    setLinks(prev => prev.map(l => l.category === cat ? { ...l, category: 'Sem categoria', subcategory: '' } : l));
+    setLinks(prev => prev.map(l => l.category === cat ? { ...l, category: UNCLASSIFIED_CATEGORY, subcategory: '' } : l));
     setSubcategories(prev => prev.filter(s => s.category !== cat));
     setCategories(prev => prev.filter(c => c !== cat));
     await refreshFolders();
@@ -622,7 +770,7 @@ function App() {
     const { oldName } = editingCategory;
     const newName = editingCategory.newName.trim();
     if (!newName || newName === oldName) { setEditingCategory(null); return; }
-    if (categories.includes(newName)) { alert('Esta categoria ja existe.'); return; }
+    if (rootCategoryNames.includes(newName)) { alert('Esta categoria ja existe.'); return; }
     const res = await fetch(API + '/categories/' + encodeURIComponent(oldName), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -733,7 +881,7 @@ function App() {
   const deleteManagerFolder = async (folder: FolderNode) => {
     const count = managerLinkCount(folder.id);
     const message = count
-      ? `Excluir "${folder.name}" e suas subcategorias? ${count} link${count === 1 ? '' : 's'} ficará${count === 1 ? '' : 'ão'} em "Sem categoria".`
+      ? `Excluir "${folder.name}" e suas subcategorias? ${count} link${count === 1 ? '' : 's'} ficará${count === 1 ? '' : 'ão'} em "${UNCLASSIFIED_CATEGORY}".`
       : `Excluir "${folder.name}" e suas subcategorias?`;
     if (!window.confirm(message)) return;
     const res = await fetch(API + '/folders/' + folder.id, { method: 'DELETE' });
@@ -757,6 +905,11 @@ function App() {
   };
 
   const requestTreeDelete = (folder: FolderNode) => {
+    if (!auth?.permissions.manageUsers) {
+      if (!auth?.authenticated) setIsLoginOpen(true);
+      else alert('Somente administradores podem excluir categorias e subcategorias.');
+      return;
+    }
     setTreeDeleteTarget(folder);
     setIsTreeDeleteModalOpen(true);
   };
@@ -794,7 +947,7 @@ function App() {
     return (
       <div key={folder.id} className="select-none">
         <div
-          className={'group flex items-center gap-1 p-2 rounded-xl transition-all ' +
+          className={'group relative flex items-center gap-1 p-2 rounded-xl transition-all ' +
             (selected ? 'bg-emerald-50 ring-1 ring-emerald-100' : 'bg-zinc-50 hover:bg-zinc-100')}
           style={{ marginLeft: depth * 14 }}
         >
@@ -823,19 +976,13 @@ function App() {
             <span className={'chartlink-folder-label truncate text-xs ' + (selected ? 'font-bold' : 'font-medium')}>{folder.name}</span>
             <span className="text-[10px] text-zinc-400 shrink-0">({managerLinkCount(folder.id)})</span>
           </button>
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0">
-            <button type="button" onClick={() => setColorFolderId(folder.id)} className="p-1 text-zinc-500 hover:text-violet-600"
-              title="Alterar cor da pasta" aria-label={`Alterar cor de ${folder.name}`}><Palette className="w-3.5 h-3.5" /></button>
-            <button type="button" onClick={() => setManagerFolderId(folder.id)} className="p-1 text-zinc-400 hover:text-emerald-600" title="Selecionar esta categoria/subcategoria como destino">
-              <Send className="w-3.5 h-3.5" />
-            </button>
-            <button type="button" onClick={() => renameManagerFolder(folder)} className="p-1 text-zinc-400 hover:text-emerald-600" title="Renomear">
-              <Edit2 className="w-3 h-3" />
-            </button>
-            <button type="button" onClick={() => requestTreeDelete(folder)} className="p-1 text-zinc-400 hover:text-red-500" title="Excluir categoria/subcategoria">
-              <Trash2 className="w-3 h-3" />
-            </button>
-          </div>
+          <FolderActionsMenu
+            folderName={folder.name}
+            onColor={auth?.permissions.manageFolders ? () => setColorFolderId(folder.id) : undefined}
+            onSelectDestination={() => setManagerFolderId(folder.id)}
+            onRename={() => void renameManagerFolder(folder)}
+            onDelete={auth?.permissions.manageUsers ? () => requestTreeDelete(folder) : undefined}
+          />
         </div>
         {expanded && children.length > 0 && (
           <div className="ml-3 pl-2 border-l border-zinc-200 mt-1 space-y-1">
@@ -868,7 +1015,7 @@ function App() {
         const subIdx   = idx(['subcategoria','subcategory']);
         const descIdx  = idx(['descricao','description','descrição']);
         if (titleIdx === -1 || urlIdx === -1) throw new Error('Colunas Titulo e URL sao obrigatorias.');
-        const newLinks: ChartLink[] = [];
+        const newLinks: LinkImportPayload[] = [];
         const newCats = new Set(categories);
         const newSubs: { name: string; category: string }[] = [];
         for (let i = 1; i < lines.length; i++) {
@@ -878,7 +1025,7 @@ function App() {
           const cat = catIdx !== -1 && vals[catIdx] ? vals[catIdx] : 'Geral';
           const sub = subIdx !== -1 ? (vals[subIdx] || '') : '';
           const desc = descIdx !== -1 ? (vals[descIdx] || '') : '';
-          newLinks.push({ id: crypto.randomUUID(), title, url, category: cat, subcategory: sub, description: desc, createdAt: Date.now() - i, folderId: null, folderPath: [], folderIds: [], folderPaths: [], folderTags: [], folderTagItems: [] });
+          newLinks.push({ title, url, category: cat, subcategory: sub, description: desc, createdAt: Date.now() - i, folderId: null });
           newCats.add(cat);
           if (sub && !subcategories.some(s => s.category === cat && s.name === sub))
             newSubs.push({ name: sub, category: cat });
@@ -938,7 +1085,7 @@ function App() {
         );
         const preview: ImportPreviewItem[] = classified.map((item, i) => ({
           ...item,
-          id: crypto.randomUUID(),
+          temporaryId: createTemporaryId('favorite'),
           description: '',
           createdAt: Date.now() - i,
         }));
@@ -954,8 +1101,8 @@ function App() {
     e.target.value = '';
   };
 
-  const updateBookmarkPreview = (id: string, field: 'category' | 'subcategory', value: string) => {
-    setBookmarkPreview(prev => prev.map(item => item.id === id ? {
+  const updateBookmarkPreview = (temporaryId: string, field: 'category' | 'subcategory', value: string) => {
+    setBookmarkPreview(prev => prev.map(item => item.temporaryId === temporaryId ? {
       ...item, [field]: value, ...(field === 'category' ? { subcategory: '' } : {}), confidence: 1, reasons: ['ajuste manual pelo usuário']
     } : item));
   };
@@ -963,9 +1110,9 @@ function App() {
   const confirmBookmarkImport = async () => {
     try {
       if (!bookmarkPreview.length) return;
-      const newLinks: ChartLink[] = bookmarkPreview.map(item => ({
-        id: item.id, title: item.title, url: item.url, category: item.category || 'OUTROS',
-        subcategory: item.subcategory || '', description: item.description, createdAt: item.createdAt, folderId: null, folderPath: [], folderIds: [], folderPaths: [], folderTags: [], folderTagItems: [],
+      const newLinks: LinkImportPayload[] = bookmarkPreview.map(item => ({
+        title: item.title, url: item.url, category: item.category || 'OUTROS',
+        subcategory: item.subcategory || '', description: item.description, createdAt: item.createdAt, folderId: null,
       }));
       const newCats = Array.from(new Set(newLinks.map(l => l.category)));
       const newSubs: { name: string; category: string }[] = [];
@@ -1056,10 +1203,10 @@ function App() {
   }
 
   return (
-    <div className="h-screen max-h-screen overflow-hidden bg-zinc-50 text-zinc-900 font-sans flex flex-col">
+    <div className="chartlink-app h-screen max-h-screen overflow-hidden bg-zinc-50 text-zinc-900 font-sans flex flex-col">
 
       {/* HEADER */}
-      <header className="shrink-0 z-40 bg-white border-b border-zinc-200 px-4 py-3 flex items-center gap-3">
+      <header className="chartlink-app-header shrink-0 z-40 bg-white border-b border-zinc-200 px-4 py-3 flex items-center gap-3">
         <button
           onClick={() => setSidebarOpen(p => !p)}
           className="p-2 rounded-xl hover:bg-zinc-100 text-zinc-500 transition-colors"
@@ -1085,13 +1232,16 @@ function App() {
           scopeLabel={scopeLabel} onQueryChange={setSearchQuery} onRegexChange={setRegexEnabled} />
 
         <div className="flex items-center gap-1 ml-auto">
+          <ThemeSelector preference={themePreference} resolved={resolvedTheme} onChange={setThemePreference} />
+          {auth && <UserMenu session={auth} onLogin={() => setIsLoginOpen(true)} onLogout={() => void logout()}
+            onPassword={() => setIsPasswordOpen(true)} onTrash={() => setIsTrashOpen(true)} onUsers={() => setIsUsersOpen(true)} />}
           <button
             onClick={() => openModal()}
-            className="flex items-center gap-1.5 bg-zinc-900 text-white px-3 py-2 rounded-xl text-sm font-semibold hover:bg-zinc-800 transition-colors"
+            className="flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-2 rounded-xl text-sm font-semibold hover:bg-emerald-700 transition-colors shadow-sm shadow-emerald-200"
           >
             <Plus className="w-4 h-4" /><span className="hidden sm:inline">Novo Link</span>
           </button>
-          <button onClick={() => { setActiveCatTab(categories[0] || ''); setManagerFolderId(null); setIsCategoryModalOpen(true); }}
+          <button onClick={() => { if (!requireAuthenticated()) return; setActiveCatTab(categories[0] || ''); setManagerFolderId(null); setIsCategoryModalOpen(true); }}
             className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-all" title="Gerenciar Categorias">
             <Settings className="w-5 h-5" />
           </button>
@@ -1103,7 +1253,7 @@ function App() {
             className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-all" title="Exportar HTML para navegador">
             <ExternalLink className="w-5 h-5" />
           </button>
-          <button onClick={() => { setImportMode('csv'); setImportError(null); setIsImportModalOpen(true); }}
+          <button onClick={() => { if (!requireAuthenticated()) return; setImportMode('csv'); setImportError(null); setIsImportModalOpen(true); }}
             className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 rounded-xl transition-all" title="Importar">
             <Upload className="w-5 h-5" />
           </button>
@@ -1126,7 +1276,10 @@ function App() {
                 <div className="flex items-center justify-between px-2 mb-3">
                   <div>
                     <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Categorias</p>
-                    <p className="text-[10px] text-zinc-400 mt-0.5">{folders.filter(f=>f.parent_id===null).length} raiz · {folders.length} total</p>
+                    <p className="chartlink-tree-summary mt-0.5">
+                      <span><strong>{categoryCount}</strong> {categoryCount === 1 ? 'categoria' : 'categorias'}</span>
+                      <span><strong>{subcategoryCount}</strong> {subcategoryCount === 1 ? 'subcategoria' : 'subcategorias'}</span>
+                    </p>
                   </div>
                   <span className="text-[10px] font-bold bg-zinc-100 text-zinc-500 px-1.5 py-0.5 rounded-full">{links.length}</span>
                 </div>
@@ -1176,7 +1329,7 @@ function App() {
                       const active = selectedFolderId === folder.id;
                       // root category for this folder — used to look up the palette color
                       const rootName = depth === 0 ? folder.name : (rootCategoryName || folder.path[0]);
-                      const fc = folderColor(depth, rootName, resolveFolderColor(folder.id, folderById));
+                      const fc = folderColor(depth, rootName, resolveFolderColor(folder.id, folderById), resolvedTheme === 'dark');
                       const isRoot = depth === 0;
                       const isDrop = dropFolderId === folder.id;
                       const count = countDescendants(folder.id);
@@ -1191,7 +1344,7 @@ function App() {
                             onDragOver={(e) => { e.preventDefault(); setDropFolderId(folder.id); }}
                             onDragLeave={() => setDropFolderId(null)}
                             onDrop={(e) => void handleFolderDrop(e, folder.id)}
-                            className={'chartlink-sidebar-category-row group flex items-center gap-0.5 transition-all duration-150 ' + (isRoot ? 'rounded-xl mb-0.5' : 'rounded-lg')}
+                            className={'chartlink-sidebar-category-row group relative flex items-center gap-0.5 transition-all duration-150 ' + (isRoot ? 'rounded-xl mb-0.5' : 'rounded-lg')}
                             data-active={active}
                             data-drop-target={isDrop}
                             style={{
@@ -1243,24 +1396,13 @@ function App() {
                               )}
                             </button>
 
-                            {/* Action buttons — visible on hover */}
-                            <div className="flex items-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity shrink-0">
-                              <button type="button" onClick={() => setColorFolderId(folder.id)}
-                                className="p-1.5 text-zinc-500 hover:text-violet-600 hover:bg-violet-50 rounded-md"
-                                title="Alterar cor da pasta" aria-label={`Alterar cor de ${folder.name}`}><Palette className="w-3.5 h-3.5" /></button>
-                              <button type="button" onClick={(e) => { e.stopPropagation(); openLinkInFolder(folder.id); }}
-                                className="p-1.5 text-zinc-300 hover:text-sky-600 hover:bg-sky-50 rounded-md" title="Adicionar URL">
-                                <Globe2 className="w-3 h-3" />
-                              </button>
-                              <button type="button" onClick={(e) => { e.stopPropagation(); openNewFolder(folder.id); }}
-                                className="p-1.5 text-zinc-300 hover:text-emerald-600 hover:bg-emerald-50 rounded-md" title="Nova subcategoria">
-                                <Plus className="w-3 h-3" />
-                              </button>
-                              <button type="button" onClick={(e) => { e.stopPropagation(); requestTreeDelete(folder); }}
-                                className="p-1.5 text-zinc-300 hover:text-red-600 hover:bg-red-50 rounded-md" title="Excluir">
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            </div>
+                            <FolderActionsMenu
+                              folderName={folder.name}
+                              onColor={auth?.permissions.manageFolders ? () => setColorFolderId(folder.id) : undefined}
+                              onAddLink={() => openLinkInFolder(folder.id)}
+                              onAddSubcategory={auth?.permissions.manageFolders ? () => openNewFolder(folder.id) : undefined}
+                              onDelete={auth?.permissions.manageUsers ? () => requestTreeDelete(folder) : undefined}
+                            />
                           </div>
 
                           {/* ── Expanded children ────────────────────────── */}
@@ -1292,14 +1434,14 @@ function App() {
                                     />
                                     <span className="truncate text-[11px] text-zinc-500 group-hover/link:text-zinc-800 transition-colors leading-snug">{link.title}</span>
                                   </a>
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); openCopyForLinks([link.id]); }}
+                                  {auth?.permissions.manageLinks && <button type="button" onClick={(e) => { e.stopPropagation(); openCopyForLinks([link.id]); }}
                                     className="p-1.5 text-zinc-300 hover:text-sky-600 rounded-md opacity-0 group-hover/link:opacity-100 transition-all" title="Copiar">
                                     <CopyPlus className="w-3 h-3" />
-                                  </button>
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); setLinkToDelete(link.id); setIsDeleteModalOpen(true); }}
+                                  </button>}
+                                  {auth?.permissions.deleteLinks && <button type="button" onClick={(e) => { e.stopPropagation(); setLinkToDelete(link.id); setIsDeleteModalOpen(true); }}
                                     className="p-1.5 mr-1 text-zinc-300 hover:text-red-600 rounded-md opacity-0 group-hover/link:opacity-100 transition-all" title="Excluir">
                                     <Trash2 className="w-3 h-3" />
-                                  </button>
+                                  </button>}
                                 </div>
                               ))}
                               {/* Recursive children */}
@@ -1317,24 +1459,24 @@ function App() {
                   <FolderPlus className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" /> Nova categoria raiz
                 </button>
 
-                {links.some(l => l.category === 'Sem categoria') && (
+                {links.some(l => l.category === UNCLASSIFIED_CATEGORY) && (
                   <div className="mt-3 pt-3 border-t border-zinc-100">
                     <button
                       type="button"
-                      onClick={() => handleSelectCategory('Sem categoria')}
+                      onClick={() => handleSelectCategory(UNCLASSIFIED_CATEGORY)}
                       className={
                         'w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-sm font-medium transition-all duration-150 ' +
-                        (filterCategory === 'Sem categoria'
-                          ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
-                          : 'text-zinc-500 hover:bg-amber-50/60 hover:text-amber-600')
+                        (filterCategory === UNCLASSIFIED_CATEGORY
+                          ? 'bg-red-50 text-zinc-900 ring-1 ring-red-200'
+                          : 'text-zinc-600 hover:bg-red-50/60 hover:text-zinc-900')
                       }
                     >
-                      <CategoryFolderIcon color="#fbbf24" />
-                      <span className="chartlink-folder-label truncate text-left flex-1">Sem categoria</span>
+                      <CategoryFolderIcon color={UNCLASSIFIED_CATEGORY_COLOR} />
+                      <span className="chartlink-folder-label truncate text-left flex-1">{UNCLASSIFIED_CATEGORY}</span>
                       <span className={
                         'text-[10px] font-bold px-1.5 py-0.5 rounded-full ' +
-                        (filterCategory === 'Sem categoria' ? 'bg-amber-200 text-amber-800' : 'bg-amber-50 text-amber-500')
-                      }>{links.filter(l => l.category === 'Sem categoria').length}</span>
+                        (filterCategory === UNCLASSIFIED_CATEGORY ? 'bg-red-200 text-black' : 'bg-red-50 text-black')
+                      }>{links.filter(l => l.category === UNCLASSIFIED_CATEGORY).length}</span>
                     </button>
                   </div>
                 )}
@@ -1367,7 +1509,8 @@ function App() {
                 const activeFolder = selectedFolderId !== null ? folderById.get(selectedFolderId)
                   : folders.find(folder => folder.parent_id === null && folder.name === filterCategory);
                 const activeCatColor = activeFolder ? resolveFolderColor(activeFolder.id, folderById) : categoryColor(filterCategory);
-                const fc = folderColor(0, activeFolder?.path[0] || filterCategory, activeCatColor);
+                const darkTheme = resolvedTheme === 'dark';
+                const fc = folderColor(0, activeFolder?.path[0] || filterCategory, activeCatColor, darkTheme);
                 const isColored = activeCatColor !== '#000000';
                 return (
                   <>
@@ -1379,7 +1522,11 @@ function App() {
                       style={
                         activeSubcategory === 'Todas'
                           ? fc.pillActiveStyle
-                          : { backgroundColor: '#fff', border: '1.5px solid #e4e4e7', color: '#52525b' }
+                          : {
+                              backgroundColor: darkTheme ? '#24282d' : '#fff',
+                              border: '1.5px solid ' + (darkTheme ? '#4b525a' : '#e4e4e7'),
+                              color: darkTheme ? '#f4f4f5' : '#52525b',
+                            }
                       }
                     >Todas</button>
 
@@ -1393,15 +1540,19 @@ function App() {
                           activeSubcategory === sub.name
                             ? fc.pillActiveStyle
                             : {
-                                backgroundColor: isColored ? hexToRgba(activeCatColor, 0.07) : '#fff',
-                                border: '1.5px solid ' + (isColored ? hexToRgba(activeCatColor, 0.4) : '#e4e4e7'),
-                                color: '#000000',
+                                backgroundColor: darkTheme
+                                  ? (isColored ? hexToRgba(activeCatColor, 0.2) : '#24282d')
+                                  : (isColored ? hexToRgba(activeCatColor, 0.07) : '#fff'),
+                                border: '1.5px solid ' + (isColored
+                                  ? hexToRgba(activeCatColor, darkTheme ? 0.7 : 0.4)
+                                  : (darkTheme ? '#4b525a' : '#e4e4e7')),
+                                color: darkTheme ? '#f4f4f5' : '#000000',
                               }
                         }
                       >{sub.name}</button>
                     ))}
 
-                    {visibleSubcats.length === 0 && (
+                    {visibleSubcats.length === 0 && filterCategory !== UNCLASSIFIED_CATEGORY && (
                       <span className="text-xs text-zinc-400 italic ml-1">
                         Nenhuma subcategoria — adicione pelo ícone de configurações
                       </span>
@@ -1422,14 +1573,19 @@ function App() {
               </span>
             </p>
             <div className="flex items-center gap-2 ml-auto">
-              <button onClick={toggleSelectVisible} className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
+              {auth?.permissions.manageLinks && <button onClick={toggleSelectVisible} className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-600 hover:bg-zinc-50">
                 {allVisibleSelected ? <CheckSquare className="w-4 h-4 text-emerald-600" /> : <Square className="w-4 h-4" />}
-                {allVisibleSelected ? 'Desmarcar visíveis' : 'Selecionar visíveis'}
-              </button>
-              <select value={sortOrder} onChange={event => { const value = event.target.value; if (value === 'recent' || value === 'az' || value === 'za') setSortOrder(value); }} aria-label="Ordenar links" className="px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-600 outline-none" title="Ordenar links">
-                <option value="recent">Mais recentes (criação)</option>
-                <option value="az">Título: A → Z</option>
-                <option value="za">Título: Z → A</option>
+                {allVisibleSelected ? 'Desmarcar' : 'Selecionar'}
+              </button>}
+              <select value={sortOrder} onChange={event => {const value = event.target.value; if (value === 'recent' || value === 'recent-edited' || value === 'az' || value === 'za' || value === 'category-az' || value === 'category-za' || value === 'primary-tag') 
+setSortOrder(value); }} aria-label="Ordenar links" className="px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-600 outline-none" title="Ordenar links">
+		<option value="recent">Recentes (Data da criação)</option>
+		<option value="recent-edited">Recentes (Data de edição)</option>
+		<option value="az">Título: A → Z</option>
+		<option value="za">Título: Z → A</option>
+		<option value="category-az">Categorias: A → Z</option>
+		<option value="category-za">Categorias: Z → A</option>
+		<option value="primary-tag">Agrupar por tags primárias</option>            
               </select>
               <div className="flex items-center bg-white border border-zinc-200 rounded-xl p-1">
               <button onClick={() => setViewMode('grid')} aria-label="Exibir em grade" aria-pressed={viewMode === 'grid'}
@@ -1455,7 +1611,7 @@ function App() {
                 <CopyPlus className="w-4 h-4" /> Copiar
               </button>
               <button onClick={() => void bulkDelete()} className="inline-flex items-center gap-1.5 px-3 py-2 bg-red-500 text-white rounded-xl text-xs font-semibold hover:bg-red-600">
-                <Trash2 className="w-4 h-4" /> Deletar selecionados
+                <Trash2 className="w-4 h-4" /> Enviar para lixeira
               </button>
               <button onClick={clearSelection} className="px-3 py-2 text-xs font-semibold text-zinc-500 hover:text-zinc-800">Limpar seleção</button>
             </div>
@@ -1471,15 +1627,17 @@ function App() {
             folders={folderById}
             selectedFolderId={selectedFolderId}
             viewMode={viewMode}
+            sortOrder={sortOrder}
             selectedLinkIds={selectedLinkIds}
             copiedId={copiedId}
             draggingLinkId={draggingLinkId}
+            canManage={!!auth?.permissions.manageLinks}
             onToggleSelection={toggleLinkSelection}
             onShare={handleShare}
             onInfo={link => setInfoLinkId(link.id)}
             onCopy={id => openCopyForLinks([id])}
             onEdit={openModal}
-            onDelete={id => { setLinkToDelete(id); setIsDeleteModalOpen(true); }}
+            onDelete={id => { if (!requireAuthenticated()) return; setLinkToDelete(id); setIsDeleteModalOpen(true); }}
             onDragStart={handleLinkDragStart}
             onDragEnd={clearDragState}
           />
@@ -1528,7 +1686,7 @@ function App() {
                 <div className="p-6 space-y-4">
                   <div>
                     <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Titulo *</label>
-                    <input autoFocus type="text" required placeholder="Ex.: Vendas Mensais"
+                    <input autoFocus type="text" required placeholder="Ex.: SI_Efficiency"
                       className="mt-1.5 w-full px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all"
                       value={formData.title} onChange={e => setFormData(p => ({ ...p, title: e.target.value }))} />
                   </div>
@@ -1541,10 +1699,19 @@ function App() {
                   <div>
                     <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Categoria / Subcategoria de destino</label>
                     <select className="mt-1.5 w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all"
-                      value={formData.folderId ?? ''}
-                      onChange={e => { const id = e.target.value ? Number(e.target.value) : null; const f = folders.find(x => x.id === id); setFormData(p => ({ ...p, folderId: id, category: f?.path[0] || p.category, subcategory: f?.path[1] || '' })); }}>
-                      <option value="">-- sem categoria --</option>
-                      {[...folders].sort((a,b) => a.path.join(' / ').localeCompare(b.path.join(' / '), 'pt-BR', { sensitivity: 'base' })).map(f => <option key={f.id} value={f.id}>{'  '.repeat(f.level)}{f.path.join(' / ')}</option>)}
+                      value={formData.folderId ?? UNCLASSIFIED_CATEGORY}
+                      disabled={!canAssignLinkCategory}
+                      onChange={e => {
+                        if (e.target.value === UNCLASSIFIED_CATEGORY) {
+                          setFormData(p => ({ ...p, folderId: null, category: UNCLASSIFIED_CATEGORY, subcategory: '' }));
+                          return;
+                        }
+                        const id = Number(e.target.value);
+                        const f = folders.find(x => x.id === id);
+                        setFormData(p => ({ ...p, folderId: id, category: f?.path[0] || p.category, subcategory: f?.path[1] || '' }));
+                      }}>
+                      <option value={UNCLASSIFIED_CATEGORY}>{UNCLASSIFIED_CATEGORY}</option>
+                      {canAssignLinkCategory && [...folders].sort((a,b) => a.path.join(' / ').localeCompare(b.path.join(' / '), 'pt-BR', { sensitivity: 'base' })).map(f => <option key={f.id} value={f.id}>{'  '.repeat(f.level)}{f.path.join(' / ')}</option>)}
                     </select>
                     <p className="mt-1 text-[10px] text-zinc-400">A URL será exibida diretamente abaixo da categoria/subcategoria na árvore lateral.</p>
                   </div>
@@ -1554,10 +1721,16 @@ function App() {
                       className="mt-1.5 w-full px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all resize-none"
                       value={formData.description} onChange={e => setFormData(p => ({ ...p, description: e.target.value }))} />
                   </div>
+                  {linkFormError && (
+                    <div role="alert" className="flex items-start gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p>{linkFormError}</p>
+                    </div>
+                  )}
                 </div>
                 <div className="p-6 bg-zinc-50 border-t border-zinc-100 flex gap-3">
                   <button type="button" onClick={closeModal} className="flex-1 px-4 py-2.5 bg-white border border-zinc-200 text-zinc-700 font-semibold rounded-xl hover:bg-zinc-50 transition-colors">Cancelar</button>
-                  <button type="submit" className="flex-1 px-4 py-2.5 bg-emerald-600 text-white font-semibold rounded-xl hover:bg-emerald-700 transition-colors">{editingLink ? 'Salvar' : 'Adicionar'}</button>
+                  <button type="submit" disabled={linkSaving} className="flex-1 px-4 py-2.5 bg-emerald-600 text-white font-semibold rounded-xl hover:bg-emerald-700 transition-colors disabled:cursor-wait disabled:opacity-60">{linkSaving ? 'Salvando...' : editingLink ? 'Salvar' : 'Adicionar'}</button>
                 </div>
               </form>
             </motion.div>
@@ -1577,12 +1750,12 @@ function App() {
               className="relative w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden">
               <div className="p-8 text-center space-y-3">
                 <div className="w-14 h-14 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mx-auto"><Trash2 className="w-7 h-7" /></div>
-                <h2 className="text-xl font-bold text-zinc-900">Excluir link?</h2>
-                <p className="text-sm text-zinc-500">Esta ação não pode ser desfeita.</p><p className="text-xs text-zinc-400 mt-2"><kbd className="px-1.5 py-0.5 bg-white border border-zinc-200 rounded">Enter</kbd> confirmar · <kbd className="px-1.5 py-0.5 bg-white border border-zinc-200 rounded">Esc</kbd> cancelar</p>
+                <h2 className="text-xl font-bold text-zinc-900">Enviar para a lixeira?</h2>
+                <p className="text-sm text-zinc-500">O link poderá ser restaurado posteriormente.</p><p className="text-xs text-zinc-400 mt-2"><kbd className="px-1.5 py-0.5 bg-white border border-zinc-200 rounded">Enter</kbd> confirmar · <kbd className="px-1.5 py-0.5 bg-white border border-zinc-200 rounded">Esc</kbd> cancelar</p>
               </div>
               <div className="p-6 bg-zinc-50 border-t border-zinc-100 flex gap-3">
                 <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 px-4 py-2.5 bg-white border border-zinc-200 text-zinc-700 font-semibold rounded-xl hover:bg-zinc-50 transition-colors">Cancelar</button>
-                <button onClick={confirmDelete} className="flex-1 px-4 py-2.5 bg-red-500 text-white font-semibold rounded-xl hover:bg-red-600 transition-colors">Excluir</button>
+                <button onClick={confirmDelete} className="flex-1 px-4 py-2.5 bg-red-500 text-white font-semibold rounded-xl hover:bg-red-600 transition-colors">Mover para lixeira</button>
               </div>
             </motion.div>
           </div>
@@ -1598,7 +1771,7 @@ function App() {
                 <div className="w-14 h-14 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mx-auto"><Trash2 className="w-7 h-7" /></div>
                 <h2 className="text-xl font-bold text-zinc-900">Excluir categoria/subcategoria?</h2>
                 <p className="text-sm text-zinc-500">A estrutura <strong>{treeDeleteTarget.path.join(' / ')}</strong> e suas subcategorias serão removidas.</p>
-                <p className="text-xs text-zinc-400">Os links afetados irão para <strong>Sem categoria</strong>. Esta ação não pode ser desfeita.</p>
+                <p className="text-xs text-zinc-400">Os links afetados irão para <strong>{UNCLASSIFIED_CATEGORY}</strong>. Esta ação não pode ser desfeita.</p>
               </div>
               <div className="p-6 bg-zinc-50 border-t border-zinc-100 flex gap-3">
                 <button onClick={() => { setIsTreeDeleteModalOpen(false); setTreeDeleteTarget(null); }} className="flex-1 px-4 py-2.5 bg-white border border-zinc-200 text-zinc-700 font-semibold rounded-xl">Cancelar</button>
@@ -1666,17 +1839,17 @@ function App() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsFolderModalOpen(false)} className="absolute inset-0 bg-zinc-900/40 backdrop-blur-sm" />
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="relative w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden">
               <div className="p-6 border-b border-zinc-100 flex items-center justify-between">
-                <div><h2 className="text-lg font-bold text-zinc-900">Nova {folderParentId === null ? 'categoria' : `subcategoria ${((folders.find(f => f.id === folderParentId)?.level ?? 0) + 1)}`}</h2><p className="text-xs text-zinc-400 mt-1">{folderParentId === null ? 'Será criada na raiz.' : 'Será criada diretamente dentro da categoria/subcategoria selecionada.'}</p></div>
+                <div><h2 className="text-lg font-bold text-zinc-900">Nova {folderParentId === null ? 'categoria' : `subcategoria ${((folders.find(f => f.id === folderParentId)?.level ?? 0) + 1)}`}</h2><p className="text-xs text-zinc-400 mt-1">{folderParentId === null ? 'Será criada na raiz.' : (folders.find(f => f.id === folderParentId)?.level === 0 ? 'Será criada diretamente dentro da categoria selecionada.' : 'Será criada diretamente dentro da subcategoria selecionada.')}</p></div>
                 <button type="button" onClick={() => setIsFolderModalOpen(false)} className="p-2 hover:bg-zinc-100 rounded-full"><X className="w-5 h-5 text-zinc-400" /></button>
               </div>
               <form onSubmit={createFolder}>
                 <div className="p-6">
-                  <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Nome da categoria/subcategoria *</label>
+                  <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Nome da {folderParentId === null ? 'categoria' : 'subcategoria'} *</label>
                   <input autoFocus required value={newFolderName} onChange={e => setNewFolderName(e.target.value)} placeholder="Ex.: Câmaras de Vácuo" className="mt-1.5 w-full px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent" />
                 </div>
                 <div className="p-6 bg-zinc-50 border-t border-zinc-100 flex gap-3">
                   <button type="button" onClick={() => setIsFolderModalOpen(false)} className="flex-1 px-4 py-2.5 bg-white border border-zinc-200 text-zinc-700 font-semibold rounded-xl">Cancelar</button>
-                  <button type="submit" className="flex-1 px-4 py-2.5 bg-emerald-600 text-white font-semibold rounded-xl hover:bg-emerald-700">Criar categoria/subcategoria</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 bg-emerald-600 text-white font-semibold rounded-xl hover:bg-emerald-700">Criar {folderParentId === null ? 'categoria' : 'subcategoria'}</button>
                 </div>
               </form>
             </motion.div>
@@ -1710,7 +1883,7 @@ function App() {
                     </form>
                   </div>
                   <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                    {categories.map(cat => (
+		    {rootCategoryNames.map(cat => (                    
                       <div key={cat} className={'group rounded-xl transition-all ' + (activeCatTab === cat ? 'bg-emerald-50' : 'hover:bg-zinc-50')}>
                         {editingCategory && editingCategory.oldName === cat ? (
                           <div className="flex items-center gap-1 p-1.5">
@@ -1725,7 +1898,7 @@ function App() {
                             <span className={'chartlink-folder-label truncate ' + (activeCatTab === cat ? 'font-bold' : '')}>{cat}</span>
                             <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0">
                               <button onClick={e => { e.stopPropagation(); setEditingCategory({ oldName: cat, newName: cat }); }} className="p-0.5 text-zinc-400 hover:text-emerald-600"><Edit2 className="w-3 h-3" /></button>
-                              <button onClick={e => { e.stopPropagation(); deleteCategory(cat); }} className="p-0.5 text-zinc-400 hover:text-red-500"><Trash2 className="w-3 h-3" /></button>
+                              {auth?.permissions.manageUsers && <button onClick={e => { e.stopPropagation(); deleteCategory(cat); }} className="p-0.5 text-zinc-400 hover:text-red-500"><Trash2 className="w-3 h-3" /></button>}
                             </div>
                           </button>
                         )}
@@ -1838,8 +2011,7 @@ function App() {
                       <p className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1">Exemplo:</p>
                       <code className="text-xs text-zinc-600 block bg-white p-2 border border-zinc-200 rounded-lg overflow-x-auto whitespace-nowrap">
                         Titulo, URL, Categoria, Subcategoria<br />
-                        Vendas Q1, https://chart.com, Financeiro, Receita
-                      </code>
+                         </code>
                     </div>
                   </div>
                 )}
@@ -1851,10 +2023,9 @@ function App() {
                         <span className="text-3xl" role="img" aria-label="Firefox">&#x1F98A;</span>
                       </div>
                       <div>
-                        <p className="text-sm font-semibold text-zinc-800">Importação inteligente de favoritos</p>
+                        <p className="text-sm font-semibold text-zinc-800">Importação de favoritos</p>
                         <p className="text-xs text-zinc-500 mt-1">
-                          O ChartLink analisa título, URL, categoria/subcategoria de origem e sinais técnicos para sugerir categoria e subcategoria.
-                        </p>
+                          O ChartLink analisa título, URL, categoria/subcategoria de origem</p>
                       </div>
                     </div>
                     <label className="block">
@@ -1862,8 +2033,8 @@ function App() {
                         className="block w-full text-sm text-zinc-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-orange-500 file:text-white hover:file:bg-orange-600 cursor-pointer" />
                     </label>
                     <div className="bg-zinc-50 p-3 rounded-2xl space-y-1 text-xs text-zinc-500">
-                      <p><strong>1.</strong> Extrai favoritos do HTML Netscape/Firefox.</p>
-                      <p><strong>2.</strong> Compara com o catálogo existente do ChartLink.</p>
+                      <p><strong>1.</strong> Extrai favoritos do HTML/Firefox.</p>
+                      <p><strong>2.</strong> Compara com a lista existente do ChartLink.</p>
                       <p><strong>3.</strong> Aplica regras para LINAC, ANEL, RF, BOOSTER, LTB, BTS, etc.</p>
                       <p><strong>4.</strong> Mostra uma prévia para revisão antes de salvar.</p>
                     </div>
@@ -1886,7 +2057,7 @@ function App() {
                     </div>
                     <div className="max-h-[48vh] overflow-y-auto border border-zinc-100 rounded-2xl divide-y divide-zinc-100">
                       {bookmarkPreview.map(item => (
-                        <div key={item.id} className="p-3 space-y-2">
+                        <div key={item.temporaryId} className="p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
                               <p className="text-xs font-bold text-zinc-800 truncate">{item.title}</p>
@@ -1896,10 +2067,10 @@ function App() {
                             <span className={'shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full ' + (item.confidence >= 0.85 ? 'bg-emerald-50 text-emerald-700' : item.confidence >= 0.58 ? 'bg-amber-50 text-amber-700' : 'bg-zinc-100 text-zinc-500')}>{Math.round(item.confidence * 100)}%</span>
                           </div>
                           <div className="grid grid-cols-2 gap-2">
-                            <select value={item.category} onChange={e => updateBookmarkPreview(item.id, 'category', e.target.value)} className="w-full px-2 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs">
+                            <select value={item.category} onChange={e => updateBookmarkPreview(item.temporaryId, 'category', e.target.value)} className="w-full px-2 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs">
                               {Array.from(new Set([...categories, 'OUTROS', 'Geral'])).map(cat => <option key={cat} value={cat}>{cat}</option>)}
                             </select>
-                            <select value={item.subcategory} onChange={e => updateBookmarkPreview(item.id, 'subcategory', e.target.value)} className="w-full px-2 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs">
+                            <select value={item.subcategory} onChange={e => updateBookmarkPreview(item.temporaryId, 'subcategory', e.target.value)} className="w-full px-2 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs">
                               <option value="">-- sem subcategoria --</option>
                               {subcategories.filter(s => s.category === item.category).map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
                             </select>
@@ -1927,6 +2098,14 @@ function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {isLoginOpen && <AuthDialog mode="login" onClose={() => setIsLoginOpen(false)} onSession={acceptAuthSession} />}
+      {isPasswordOpen && auth?.authenticated && <AuthDialog mode="change-password"
+        onClose={() => setIsPasswordOpen(false)}
+        onSession={next => { acceptAuthSession(next); if (!next.user?.mustChangePassword) setIsPasswordOpen(false); }} />}
+      {isTrashOpen && auth?.authenticated && <TrashDialog session={auth} onClose={() => setIsTrashOpen(false)}
+        onChanged={() => void refreshLinksAndFolders()} />}
+      {isUsersOpen && auth?.permissions.manageUsers && auth.user && <AdminUsersDialog currentUserId={auth.user.id} onClose={() => setIsUsersOpen(false)} />}
 
     </div>
   );

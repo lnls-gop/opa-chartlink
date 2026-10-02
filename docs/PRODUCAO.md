@@ -1,122 +1,92 @@
-# Instalação e operação na intranet
+# Operação em produção
 
-## Arquitetura
+Para a primeira instalação na máquina informada, siga [FAC6.md](FAC6.md). O projeto Compose chama-se opa-chartlink e possui dois serviços: web (Nginx) e api (Gunicorn/Flask). O banco fica em diretório local externo às imagens.
 
-| Serviço | Execução | Acesso |
-| --- | --- | --- |
-| Frontend | Nginx servindo os arquivos compilados pelo Vite | Porta 8080 do servidor, configurável |
-| Backend | Gunicorn, 1 processo e 4 threads, API Flask | Somente pela rede interna dos containers |
-| Banco | SQLite em diretório persistente do servidor | `/var/lib/chartlink/data/chartlink.db` por padrão |
-| Backups | Snapshots SQLite fora do código | `/var/backups/chartlink` por padrão |
-
-Esta versão não tem autenticação de usuários. Disponibilize-a na rede interna autorizada; uma publicação na internet exige controle de acesso e HTTPS antes de abrir o serviço ao público. Repositório privado no GitHub não controla o acesso à aplicação em execução.
-
-## 1. Preparar o servidor
-
-Use um Linux com Docker Engine e plugin Docker Compose v2 (2.24 ou superior). Confirme:
+## Compilar é diferente de iniciar
 
 ```bash
-docker version
-docker compose version
+sh scripts/chartlink.sh build
 ```
 
-Em um servidor com systemd, habilite o Docker no boot:
+Execute build somente em uma máquina autorizada com memória e disco disponíveis. Esse comando precisa baixar dependências. Os limites de memória do compose.yaml se aplicam à execução, não à compilação.
 
 ```bash
-sudo systemctl enable --now docker
+sh scripts/chartlink.sh save-images
 ```
 
-Se o comando Docker indicar falta de permissão, use os mesmos comandos precedidos por `sudo`, conforme a política da equipe. Não use `chmod 777` no banco ou no socket Docker.
+Exporta as imagens para uma nova pasta, com SHA256SUMS. Transfira a pasta completa para o servidor. Use apenas imagens de origem confiável: checksum detecta alterações, mas não comprova autoria.
 
-Instalação oficial por distribuição: [Debian](https://docs.docker.com/engine/install/debian/), [Ubuntu](https://docs.docker.com/engine/install/ubuntu/). A compatibilidade depende da versão real do sistema. Os builds precisam de acesso aos registros das imagens, ao npm e ao PyPI; configure o proxy institucional no Docker quando necessário. Não é preciso instalar Node ou Python na máquina de produção.
-
-## 2. Colocar o código em uma pasta nova
-
-Extraia este pacote em uma pasta separada da instalação antiga, ou clone o repositório após publicá-lo. Entre na pasta que contém `compose.yaml`.
-
-Crie a configuração local sem sobrescrever uma configuração existente:
+No servidor, após preparar .env e substituir o caminho abaixo pelo diretório real:
 
 ```bash
-cp -n .env.example .env
-nano .env
+sh scripts/chartlink.sh load-images "/CAMINHO_REAL/pasta-das-imagens"
+sh scripts/chartlink.sh check
 ```
 
-Confira os diretórios, que devem ficar em disco local e fora da pasta do código. Mantenha `CHARTLINK_BIND_IP=127.0.0.1` para validar no próprio servidor. Para acesso por outros computadores, coloque nesse campo o IP LAN atual do servidor e mantenha `CHARTLINK_PORT=8080`, ou escolha uma porta livre. Use `hostname -I` para consultar os endereços e selecione o da rede utilizada pelos usuários.
+Importe o banco antes do primeiro start. O script exige imagens presentes e recusa importação sobre um destino existente. Não use init-empty para migrar uma instalação existente.
 
-O arquivo `.env` não é enviado ao GitHub. Não coloque o banco SQLite em compartilhamento de rede para esta implantação; os backups podem ser copiados para outro equipamento depois de concluídos.
+## Operação diária
 
-## 3. Importar seu banco atual uma única vez
-
-Pare o Flask da instalação antiga antes da mudança definitiva, para evitar novas edições na base antiga após a cópia. O comando de importação usa a API de backup do SQLite e também inclui dados já confirmados em WAL, quando houver.
-
-Localize o arquivo real utilizado pela instalação atual. No comando abaixo, substitua o caminho entre aspas pelo caminho existente no seu computador; o exemplo não é um caminho pronto para uso:
-
-```bash
-sh scripts/chartlink.sh import-db "/caminho/real/da/instalacao/backend/chartlink.db"
-```
-
-O comando compila a imagem da API, confere a origem, prepara os diretórios, cria um backup verificado e copia os dados para o novo local. Ele informa a quantidade de links encontrada e os caminhos do banco e do backup dentro do container. Os diretórios correspondentes no servidor são os configurados em `.env`. Os arquivos ficam com leitura e escrita restritas ao usuário do serviço (UID 10001) e ao administrador.
-
-Se o arquivo não existir, a operação para com uma mensagem explícita. Se já houver um banco no destino, ele é preservado e a importação é recusada. Não execute `init-empty` para contornar esses erros: essa opção destina-se apenas a uma instalação nova que não precisa de links anteriores.
-
-Para uma instalação realmente vazia, o comando explícito é:
-
-```bash
-sh scripts/chartlink.sh init-empty
-```
-
-Os containers de produção recusam iniciar sobre um arquivo ausente, para evitar criar uma base vazia acidentalmente em caso de caminho configurado incorretamente.
-
-## 4. Iniciar e acessar
+Execute na pasta do projeto que contém o .env da instalação:
 
 ```bash
 sh scripts/chartlink.sh start
 sh scripts/chartlink.sh status
+sh scripts/chartlink.sh logs
 ```
 
-Os dois serviços devem aparecer saudáveis. No próprio servidor, com o IP padrão, abra `http://127.0.0.1:8080`. Se configurou o IP LAN, use `http://IP_DO_SERVIDOR:8080` nos computadores da rede, substituindo o marcador pelo IP real. A porta precisa estar liberada para a rede autorizada conforme a política local.
-
-Confira a quantidade de links, categorias e cores antes de desativar definitivamente a versão antiga. Nesta execução não é necessário usar `npm run dev` nem `python server.py`.
-
-Agora você pode fechar o terminal e o VS Code. A política `restart: unless-stopped` mantém os containers após reinício do Docker/servidor. Se você executar o comando `stop`, eles permanecem parados até um novo `start`.
-
-## 5. Operação diária
-
-| Necessidade | Comando |
-| --- | --- |
-| Ver estado | `sh scripts/chartlink.sh status` |
-| Acompanhar logs | `sh scripts/chartlink.sh logs` |
-| Fazer backup | `sh scripts/chartlink.sh backup` |
-| Parar deliberadamente | `sh scripts/chartlink.sh stop` |
-| Iniciar novamente | `sh scripts/chartlink.sh start` |
-
-Ctrl+C durante a visualização dos logs fecha apenas essa visualização. Os arquivos de log têm rotação configurada. O healthcheck informa falhas; Docker reinicia um processo que encerra, mas não reinicia automaticamente um container apenas por estar marcado como unhealthy.
-
-O backup cria um arquivo com data UTC e identificador único, sem substituir cópias anteriores. A verificação inclui integridade SQLite e contagem de links. Faça backups periódicos e copie-os também para outro armazenamento; manter uma cópia no mesmo disco não protege de falha desse disco.
-
-## 6. Atualizar o código
-
-Depois de confirmar que suas alterações locais estão versionadas:
+Para criar o primeiro administrador depois que a API estiver em execução:
 
 ```bash
-git pull --ff-only
+sh scripts/chartlink.sh create-admin
+```
+
+start usa imagens locais, sem compilar ou baixar, e espera as verificações de saúde. Ctrl+C em logs fecha somente a visualização. Para parar exclusivamente este projeto:
+
+```bash
+sh scripts/chartlink.sh stop
+```
+
+Não execute limpeza global do Docker nem remova volumes de outros projetos. A política unless-stopped reinicia serviços após falhas/reinício do daemon, exceto quando foram parados manualmente. Isso não substitui supervisão, backups nem disponibilidade do servidor.
+
+## Backup
+
+```bash
+sh scripts/chartlink.sh backup
+```
+
+O comando utiliza a API de backup SQLite e valida a cópia, incluindo alterações já confirmadas em WAL. Imprime o nome do arquivo no diretório /backups do container, correspondente a CHARTLINK_BACKUP_DIR no host. O usuário interno é UID/GID 10001; os arquivos não são públicos. Para acesso no host, pode ser necessário sudo autorizado. Não use chmod 777.
+
+Configure, com TI, uma rotina de backup e cópia para outro armazenamento protegido. Ela não é instalada automaticamente por este pacote. Teste restauração em uma instalação separada. Um backup no mesmo disco não protege contra perda desse disco.
+
+## Atualização com imagens já geradas
+
+1. Conserve o código/configuração anterior, as imagens anteriores e um backup validado.
+2. Gere as imagens da nova revisão em máquina apropriada, atribuindo uma nova CHARTLINK_IMAGE_TAG. Ajuste também nomes/tags do workflow se usá-lo. Não reutilize uma tag para revisões distintas.
+3. Coloque o novo código em pasta separada. Copie seu `.env` para ela e altere apenas a tag, mantendo os caminhos dos dados, a mesma `CHARTLINK_SECRET_KEY` e o mesmo projeto `opa-chartlink`. Ao migrar de uma revisão anterior à 1.0.8, gere a chave porque ela ainda não existia.
+4. Carregue as novas imagens nessa configuração e execute check.
+5. Em janela combinada com os usuários:
+
+```bash
 sh scripts/chartlink.sh update
 ```
 
-O comando compila primeiro. Se a compilação passar, para os serviços, faz um backup consistente e inicia as novas imagens. Os dados permanecem nos diretórios configurados. Não execute `import-db` novamente a cada atualização e não substitua o diretório de dados por arquivos do repositório.
+update para somente opa-chartlink, cria backup e então inicia com as imagens já carregadas. Se o backup falhar, o serviço permanece parado e a nova versão não é iniciada; resolva o erro antes de prosseguir. Não há rollback automático.
 
-Se a atualização falhar depois de parar os serviços, veja os logs e corrija a causa antes de iniciar novamente. Para retornar a uma versão anterior, use uma cópia do código naquela tag com a mesma configuração; mudanças futuras de schema podem exigir restaurar o snapshot correspondente.
+O backend pode aplicar migrações na primeira inicialização. Para reverter após uma migração, não presuma que basta trocar a imagem: preserve o banco atual e prepare uma cópia do backup pré-atualização em diretório NOVO, usando a versão anterior e uma janela de manutenção. Nunca sobrescreva o único banco disponível.
 
-## 7. Restaurar um backup sem apagar a instalação anterior
+## Rede e segurança
 
-Pare os serviços. Em `.env`, aponte `CHARTLINK_DATA_DIR` para um **novo diretório vazio**, mantendo o diretório anterior intacto. Execute `import-db` informando o caminho de um snapshot válido em `/var/backups/chartlink` (use `sudo` se precisar de acesso aos arquivos do serviço), depois `start`. Confirme os dados restaurados antes de remover qualquer cópia antiga.
+O padrão publica somente em 127.0.0.1:8080. Para rede interna, defina o IP LAN do host no .env e autorize acesso com TI. A API não publica uma porta própria no host; o Nginx encaminha /api.
 
-## Diagnóstico
+Esta versão implementa autenticação local para edição e exclusão, mas continua operando em HTTP. Rede interna, IP privado e senha local não criptografam o tráfego. Use senhas exclusivas do ChartLink, mantenha sessões curtas e não exponha a porta à Internet. O banco e os backups agora também contêm hashes de senha e auditoria, portanto devem ter acesso restrito. Não suponha que uma regra UFW sozinha filtre portas publicadas pelo Docker.
 
-- **Cannot connect to Docker / permission denied:** verifique o serviço Docker e a autorização do usuário no servidor.
-- **Banco de origem não encontrado:** confira o caminho real; espaços no caminho devem permanecer dentro das aspas.
-- **API não inicia / unable to open database file:** confira `.env`, faça a importação inicial e confirme as permissões. Não crie outro banco por tentativa.
-- **Só funciona no próprio servidor:** confira `CHARTLINK_BIND_IP`, a porta e as regras de acesso da rede.
-- **502 no navegador:** use `status` e `logs`; confira `/api/health`.
+Veja as ressalvas oficiais sobre [Docker e firewalls](https://docs.docker.com/engine/network/packet-filtering-firewalls/).
 
-Referências: [Flask com Gunicorn](https://flask.palletsprojects.com/en/stable/deploying/gunicorn/), [reinício automático do Docker](https://docs.docker.com/engine/containers/start-containers-automatically/), [persistência com bind mounts](https://docs.docker.com/engine/storage/bind-mounts/).
+## Limites e acompanhamento
+
+API: até 512 MiB e 1 CPU. Web: até 128 MiB e 0,5 CPU. Swap dos containers limitada ao mesmo total de memória, desabilitando swap adicional quando suportado pelo host. São limites iniciais, não reservas nem medição do consumo real. O host e os builds precisam de recursos adicionais. Falta de memória pode encerrar um processo no container.
+
+Acompanhe uso e logs após implantar; ajuste somente com evidência e capacidade disponível. Os logs Docker têm rotação. Nenhum comando do pacote move /var/lib/docker ou modifica o container kind_newton.
+
+Referências: [Compose services](https://docs.docker.com/reference/compose-file/services/), [Docker image save](https://docs.docker.com/reference/cli/docker/image/save/), [Docker image load](https://docs.docker.com/reference/cli/docker/image/load/).
