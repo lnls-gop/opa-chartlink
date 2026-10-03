@@ -91,7 +91,7 @@ test('menu contextual preserva os ícones e usa pasta com adição para subcateg
 
 test('seletor oferece os três temas e a resolução automática acompanha o sistema', () => {
   const html = renderToStaticMarkup(<ThemeSelector preference="system" resolved="dark" onChange={noop} />);
-  assert.match(html, /Tema: Automático/);
+  assert.match(html, /Tema: Sistema/);
   assert.match(html, /lucide-monitor/);
   assert.equal(resolveTheme('system', true), 'dark');
   assert.equal(resolveTheme('system', false), 'light');
