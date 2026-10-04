@@ -16,7 +16,6 @@ Organizador de links e dashboards: React 18, TypeScript, Vite 4, Tailwind CSS 3,
 - [Alterações da área de links não classificados](docs/RELEASE_1.0.3.md)
 - [Correção para uso via HTTP por IP](docs/RELEASE_1.0.2.md)
 - [Alterações e limites da validação 1.0.1](docs/RELEASE_1.0.1.md)
-- [Histórico da interface](MELHORIAS_INTERFACE.md)
 
 O GitHub guarda o código e pode compilar as imagens. A aplicação roda na fac6. O servidor precisa permanecer ligado, conectado à rede e com Docker ativo. Serviços parados manualmente precisam ser iniciados novamente.
 
