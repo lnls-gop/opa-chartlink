@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import type { ChartLink, FolderNode } from '../types/chartlink';
+import { UNCLASSIFIED_CATEGORY, UNCLASSIFIED_CATEGORY_COLOR } from '../constants/categories';
 
 const CATEGORY_COLORS: Readonly<Record<string, string>> = {
   LINAC: '#f3d2d5',
@@ -8,6 +9,7 @@ const CATEGORY_COLORS: Readonly<Record<string, string>> = {
   BTS: '#b2ebf2',
   'ANEL (SI)': '#56aeff',
   IDs: '#bbbbdd',
+  [UNCLASSIFIED_CATEGORY]: UNCLASSIFIED_CATEGORY_COLOR,
 };
 
 export type CategoryStyle = CSSProperties & {

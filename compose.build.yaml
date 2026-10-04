@@ -1,0 +1,10 @@
+# Usado SOMENTE pelo comando build. A execução normal não compila imagens.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web

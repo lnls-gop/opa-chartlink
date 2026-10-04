@@ -65,7 +65,7 @@ export function FolderColorDialog({ folder, inheritedColor, onSave, onClose }: F
           {folder.parent_id === null ? 'Usar a cor padrão da categoria' : 'Herdar a cor da pasta superior'}
         </label>
       </fieldset>
-      <p className="text-xs text-zinc-500 mt-3">Subpastas sem cor própria acompanham esta escolha. As letras permanecem pretas.</p>
+      <p className="text-xs text-zinc-500 mt-3">Subcategorias sem cor definida acompanham esta escolha. O contraste dos textos é ajustado ao tema.</p>
       {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
       <div className="flex justify-end gap-2 mt-6">
         <button type="button" disabled={busy} onClick={onClose} className="px-4 py-2 rounded-xl border border-zinc-200 text-sm">Cancelar</button>

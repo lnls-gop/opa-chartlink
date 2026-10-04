@@ -30,7 +30,7 @@ export function LinkSearchInput({ query, regex, invalid, scopeLabel, onQueryChan
           <X size={18} aria-hidden="true" />
         </button>}
         <button type="button" onClick={() => onRegexChange(!regex)} aria-pressed={regex}
-          aria-label="Usar expressão regular" title="Ativar/desativar expressão regular"
+          aria-label="Usar Regex" title="Ativar/desativar Regex"
           className={'p-1.5 rounded-lg ' + (regex ? 'bg-violet-100 text-violet-800' : 'text-zinc-500 hover:bg-white')}>
           <Regex size={18} aria-hidden="true" />
         </button>

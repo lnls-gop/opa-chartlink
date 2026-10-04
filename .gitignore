@@ -19,6 +19,9 @@ coverage/
 *.backup
 *.bak
 *.zip
+*.tar
+*.tar.gz
+chartlink-imagens-*/
 data/
 backups/
 exports/
@@ -36,3 +39,8 @@ src/data/chartlinkCatalog.ts
 .idea/
 .DS_Store
 Thumbs.db
+
+# Cópias manuais de arquivos-fonte
+src/App_*.tsx
+src/chartlink-modern_*.css
+backend/server.py.antes-*

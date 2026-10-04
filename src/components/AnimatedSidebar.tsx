@@ -1,9 +1,9 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 
-export const SIDEBAR_MIN_WIDTH = 260;
+export const SIDEBAR_MIN_WIDTH = 320;
 export const SIDEBAR_MAX_WIDTH = 720;
-export const SIDEBAR_DEFAULT_WIDTH = 360;
+export const SIDEBAR_DEFAULT_WIDTH = 380;
 
 export function clampSidebarWidth(width: number): number {
   return Number.isFinite(width)
@@ -42,7 +42,7 @@ export function AnimatedSidebar({
       initial={false}
       animate={{ width: open ? width : 0 }}
       transition={{ duration: reduceMotion || resizing ? 0 : 0.24, ease: 'easeInOut' }}
-      className="relative overflow-hidden shrink-0 min-h-0 bg-white flex flex-col"
+      className="chartlink-sidebar relative overflow-hidden shrink-0 min-h-0 bg-white flex flex-col"
       style={{ pointerEvents: open ? 'auto' : 'none' }}
     >
       <motion.div

@@ -1,6 +1,7 @@
 import { CalendarDays, Clock3, ExternalLink, FolderTree, Globe2, Info } from 'lucide-react';
 import type { ChartLink, FolderNode } from '../types/chartlink';
 import { AppDialog } from './AppDialog';
+import { UNCLASSIFIED_CATEGORY } from '../constants/categories';
 import { displayLinkHost, formatLinkDate, resolveLinkUrl } from '../utils/linkUrl';
 
 interface LinkInfoDialogProps {
@@ -26,7 +27,7 @@ export function LinkInfoDialog({ link, folders, onClose }: LinkInfoDialogProps) 
           <dd className="mt-1 break-all text-zinc-900">{link.url}</dd></div>
         <div><dt className="chartlink-info-label"><FolderTree size={15} /> Categorias e subcategorias</dt>
           <dd className="flex flex-wrap gap-2 mt-2">{locations.map((path, index) => (
-            <span key={`${index}:${path.join('/')}`} className="chartlink-info-tag">{path.join(' / ') || 'Sem categoria'}</span>
+            <span key={`${index}:${path.join('/')}`} className="chartlink-info-tag">{path.join(' / ') || UNCLASSIFIED_CATEGORY}</span>
           ))}</dd></div>
         <div><dt className="chartlink-info-label"><Info size={15} /> Descrição</dt>
           <dd className="mt-1 whitespace-pre-wrap break-words text-zinc-700">{link.description?.trim() || 'Sem descrição cadastrada.'}</dd></div>

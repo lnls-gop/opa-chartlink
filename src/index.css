@@ -6,7 +6,9 @@
 
 @layer base {
   body {
-    @apply bg-slate-50 text-slate-900 font-sans;
+    @apply font-sans;
+    background-color: var(--chartlink-page-bg, #fafafa);
+    color: var(--chartlink-text, #18181b);
   }
 }
 

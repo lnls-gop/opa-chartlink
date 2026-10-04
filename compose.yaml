@@ -1,15 +1,24 @@
-name: chartlink
+name: opa-chartlink
 
 services:
   api:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.api
+    image: opa-chartlink-api:${CHARTLINK_IMAGE_TAG:-1.0.8}
+    pull_policy: never
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
     environment:
       CHARTLINK_DATABASE: /data/chartlink.db
       CHARTLINK_REQUIRE_DATABASE: "1"
       CHARTLINK_BACKUP_DIR: /backups
+      CHARTLINK_SECRET_KEY: ${CHARTLINK_SECRET_KEY:?Defina CHARTLINK_SECRET_KEY no .env}
+      CHARTLINK_COOKIE_SECURE: "0"
+      CHARTLINK_SESSION_MINUTES: ${CHARTLINK_SESSION_MINUTES:-30}
+      CHARTLINK_LOGIN_MAX_FAILURES: ${CHARTLINK_LOGIN_MAX_FAILURES:-5}
+      CHARTLINK_LOGIN_LOCK_MINUTES: ${CHARTLINK_LOGIN_LOCK_MINUTES:-15}
+      CHARTLINK_PUBLIC_CREATE_LIMIT: ${CHARTLINK_PUBLIC_CREATE_LIMIT:-30}
+      CHARTLINK_PUBLIC_CREATE_WINDOW_SECONDS: ${CHARTLINK_PUBLIC_CREATE_WINDOW_SECONDS:-600}
     volumes:
       - ${CHARTLINK_DATA_DIR:?Defina CHARTLINK_DATA_DIR no .env}:/data
       - ${CHARTLINK_BACKUP_DIR:?Defina CHARTLINK_BACKUP_DIR no .env}:/backups
@@ -29,10 +38,12 @@ services:
         max-file: "3"
 
   web:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.web
+    image: opa-chartlink-web:${CHARTLINK_IMAGE_TAG:-1.0.8}
+    pull_policy: never
     restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
     depends_on:
       api:
         condition: service_healthy
