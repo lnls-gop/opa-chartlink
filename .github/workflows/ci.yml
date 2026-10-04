@@ -68,7 +68,18 @@ jobs:
           if-no-files-found: error
       - name: Logs em caso de erro
         if: failure()
-        run: docker compose logs --no-color --tail 100
+        run: |
+          if [ -f .env ]; then
+            docker compose logs --no-color --tail 100 || true
+          else
+            echo "Configuração temporária ainda não foi criada; não há logs de containers."
+          fi
+
       - name: Encerrar containers temporários
         if: always()
-        run: docker compose down
+        run: |
+          if [ -f .env ]; then
+            docker compose down --remove-orphans || true
+          else
+            echo "Configuração temporária ainda não foi criada; não há containers para encerrar."
+          fi
