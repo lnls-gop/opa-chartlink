@@ -59,7 +59,6 @@ npm test
 O workflow do GitHub também testa os containers com um banco temporário. Quando tudo passa, as imagens Linux AMD64 ficam disponíveis como artefato.
 
 ## Produção
-
-O código fica no GitHub, mas a aplicação roda na FAC6. O servidor precisa permanecer ligado, conectado à rede e com o Docker ativo.
+A aplicação roda na FAC6. O servidor precisa permanecer ligado, conectado à rede e com o Docker ativo.
 
 Os dados de produção ficam fora do diretório do código. O banco SQLite ativo, o arquivo `.env` e os backups não devem ser enviados ao GitHub.
