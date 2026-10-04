@@ -1,6 +1,6 @@
-# ChartLink 21 — pacote de produção 1.0.8
+# ChartLink — pacote de produção 1.0.8
 
-Organizador de links e dashboards: React 18, TypeScript, Vite 4, Tailwind CSS 3, Flask e SQLite. Esta revisão adiciona autenticação local, autorização por perfil, proteção CSRF, auditoria e lixeira recuperável.
+Organizador de links e dashboards: React 18, TypeScript, Vite 4, Tailwind CSS 3, Flask e SQLite. Esta revisão adiciona autenticação local, autorização por perfil, proteção CSRF, logs e lixeira recuperável.
 
 ## Comece aqui
 
@@ -18,11 +18,9 @@ Organizador de links e dashboards: React 18, TypeScript, Vite 4, Tailwind CSS 3,
 - [Alterações e limites da validação 1.0.1](docs/RELEASE_1.0.1.md)
 - [Histórico da interface](MELHORIAS_INTERFACE.md)
 
-O GitHub guarda o código e pode compilar as imagens. A aplicação roda na fac6. Depois de iniciada em segundo plano, não depende do terminal nem do VS Code. O servidor precisa permanecer ligado, conectado à rede e com Docker ativo. Serviços parados manualmente precisam ser iniciados novamente.
+O GitHub guarda o código e pode compilar as imagens. A aplicação roda na fac6. O servidor precisa permanecer ligado, conectado à rede e com Docker ativo. Serviços parados manualmente precisam ser iniciados novamente.
 
 ## Separação entre código e dados
-
-Este ZIP contém código e configuração, não imagens Docker prontas. Não inclui banco, backups, ambientes virtuais, node_modules, CSVs de dados nem o catálogo estático de URLs privadas. O banco atual deve ser importado separadamente. A importação de favoritos usa os links já existentes na instalação como referência e mantém as regras de classificação por subsistema.
 
 | Caminho | Função |
 | --- | --- |
@@ -39,7 +37,7 @@ Os dados de produção ficam em diretórios locais externos ao código. Não col
 
 ## Desenvolvimento local
 
-Para reproduzir as imagens: Node 22 e Python 3.12. O Python 3.6.8 da linac-opi2 não precisa ser atualizado para executar a aplicação dentro do Docker na fac6.
+Para reproduzir as imagens: Node 22 e Python 3.12.
 
 ```bash
 npm ci --include=dev
