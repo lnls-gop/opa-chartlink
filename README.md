@@ -1,4 +1,4 @@
-# ChartLink — pacote de produção 1.0.8
+# ChartLink — v 1.0.8
 
 Organizador de links e dashboards: React 18, TypeScript, Vite 4, Tailwind CSS 3, Flask e SQLite. Esta revisão adiciona autenticação local, autorização por perfil, proteção CSRF, logs e lixeira recuperável.
 
