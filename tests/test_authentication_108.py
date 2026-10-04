@@ -84,7 +84,7 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(admin.delete("/api/trash/links/" + link["id"], headers={"X-CSRF-Token": token}).status_code, 200)
         created = admin.post("/api/admin/users", json={
             "username": "novo.usuario", "displayName": "Novo Usuário",
-            "password": "senha temporaria muito forte", "role": "user",
+            "password": "SenhaTemporaria#2026", "role": "user",
         }, headers={"X-CSRF-Token": token})
         self.assertEqual(created.status_code, 201, created.get_json())
         self.assertTrue(any(row["username"] == "novo.usuario" for row in admin.get("/api/admin/users").get_json()))
@@ -111,15 +111,15 @@ class AuthenticationTests(unittest.TestCase):
         admin, token = self.login("admin", "frase segura de teste 123")
         created = admin.post("/api/admin/users", json={
             "username": "temporario", "displayName": "Temporário",
-            "password": "primeira senha temporaria", "role": "user",
+            "password": "PrimeiraSenha#2026", "role": "user",
         }, headers={"X-CSRF-Token": token})
         self.assertEqual(created.status_code, 201)
-        client, token = self.login("temporario", "primeira senha temporaria")
+        client, token = self.login("temporario", "PrimeiraSenha#2026")
         blocked = client.post("/api/folders", json={"name": "Bloqueado"}, headers={"X-CSRF-Token": token})
         self.assertEqual(blocked.status_code, 403)
         self.assertEqual(blocked.get_json()["code"], "password_change_required")
         changed = client.post("/api/auth/change-password", json={
-            "currentPassword": "primeira senha temporaria", "newPassword": "segunda senha definitiva 789",
+            "currentPassword": "PrimeiraSenha#2026", "newPassword": "NovaSenhaDefinitiva#2026",
         }, headers={"X-CSRF-Token": token})
         self.assertEqual(changed.status_code, 200, changed.get_json())
         token = changed.get_json()["csrfToken"]

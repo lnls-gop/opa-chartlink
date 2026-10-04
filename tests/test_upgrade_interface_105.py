@@ -29,7 +29,7 @@ class UpgradeInterface105Tests(unittest.TestCase):
     def test_folder_menu_opens_on_the_right_and_closes_on_leave(self):
         self.assertIn("createPortal", self.menu)
         self.assertIn("left: rect.right + 8", self.menu)
-        self.assertIn("onMouseLeave={scheduleClose}", self.menu)
+        self.assertIn("onPointerLeave={closeMenu}", self.menu)
         self.assertIn("position: fixed", self.css)
 
     def test_category_and_subcategory_counts_are_separate(self):
