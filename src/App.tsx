@@ -16,7 +16,7 @@ import { UserMenu } from './components/UserMenu';
 import { TrashDialog } from './components/TrashDialog';
 import { AdminUsersDialog } from './components/AdminUsersDialog';
 import { useTheme } from './hooks/useTheme';
-import { scopeLinks, sortLinks } from './utils/linkView';
+import { scopeLinks, sortLinks, sortSidebarLinks } from './utils/linkView';
 import { resolveLinkUrl } from './utils/linkUrl';
 import { createTemporaryId } from './utils/temporaryId';
 import { apiRequest as fetch, loadAuthSession, updateAuthSession } from './api/client';
@@ -27,7 +27,7 @@ import {
   Link as LinkIcon, X, Edit2, Settings, Check,
   Upload, FileText, AlertCircle,
   Tag, FolderOpen, Folder, CheckSquare, Square, ArrowRightLeft,
-  ChevronRight, ChevronDown, FolderPlus, CopyPlus, Send,
+  ChevronRight, ChevronDown, FolderPlus, CopyPlus, Send, BarChart3,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { parseBookmarkHtml, type ParsedBookmark } from './bookmarks/bookmarkParser';
@@ -1233,6 +1233,16 @@ function App() {
 
         <div className="flex items-center gap-1 ml-auto">
           <ThemeSelector preference={themePreference} resolved={resolvedTheme} onChange={setThemePreference} />
+          <a
+            href="archiver-link-builder.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="chartlink-archiver-builder-link"
+            aria-label="Abrir Archiver Link Builder"
+            title="Archiver Link Builder (em desenvolvimento)"
+          >
+            <BarChart3 className="w-5 h-5" aria-hidden="true" />
+          </a>
           {auth && <UserMenu session={auth} onLogin={() => setIsLoginOpen(true)} onLogout={() => void logout()}
             onPassword={() => setIsPasswordOpen(true)} onTrash={() => setIsTrashOpen(true)} onUsers={() => setIsUsersOpen(true)} />}
           <button
@@ -1325,7 +1335,7 @@ function App() {
                       const key = `folder:${folder.id}`;
                       const expanded = expandedFolders.has(key);
                       const children = childrenOf(folder.id);
-                      const directLinks = sortLinks(links.filter(l => l.folderIds.includes(folder.id)), sortOrder);
+                      const directLinks = sortSidebarLinks(links.filter(l => l.folderIds.includes(folder.id)));
                       const active = selectedFolderId === folder.id;
                       // root category for this folder — used to look up the palette color
                       const rootName = depth === 0 ? folder.name : (rootCategoryName || folder.path[0]);
@@ -1347,16 +1357,13 @@ function App() {
                             className={'chartlink-sidebar-category-row group relative flex items-center gap-0.5 transition-all duration-150 ' + (isRoot ? 'rounded-xl mb-0.5' : 'rounded-lg')}
                             data-active={active}
                             data-drop-target={isDrop}
-                            style={{
-                              marginLeft: depth * 10,
-                              ...getCategoryStyle(rootName, fc.color),
-                            }}
+                            style={getCategoryStyle(rootName, fc.color)}
                           >
                             {/* Expand/collapse toggle */}
                             <button
                               type="button"
                               onClick={() => toggleFolder(key)}
-                              className={'p-1.5 shrink-0 transition-colors ' + (active ? 'text-current' : 'text-zinc-300 hover:text-zinc-600')}
+                              className={'chartlink-tree-toggle shrink-0 transition-colors ' + (active ? 'text-current' : 'text-zinc-300 hover:text-zinc-600')}
                               style={active ? { color: fc.color } : {}}
                               title={expanded ? 'Recolher' : 'Expandir'}
                             >
@@ -1408,8 +1415,8 @@ function App() {
                           {/* ── Expanded children ────────────────────────── */}
                           {expanded && (
                             <div
-                              className="ml-4 space-y-0.5"
-                              style={{ borderLeft: '2px solid ' + hexToRgba(fc.color, 0.35), paddingLeft: '8px' }}
+                              className="chartlink-tree-children space-y-0.5"
+                              style={{ borderLeftColor: hexToRgba(fc.color, 0.35) }}
                             >
                               {/* Direct links inside this folder */}
                               {directLinks.map(link => (

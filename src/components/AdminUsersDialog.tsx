@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Activity, AlertCircle, Plus, RefreshCw, Users } from 'lucide-react';
+import { Activity, AlertCircle, Pencil, Plus, RefreshCw, Save, Trash2, Users, X } from 'lucide-react';
 import { apiRequest, readApiError } from '../api/client';
 import type { AuditEntry, ManagedUser, UserRole } from '../types/auth';
 import { AppDialog } from './AppDialog';
@@ -9,6 +9,7 @@ interface AdminUsersDialogProps { currentUserId: number; onClose: () => void; }
 const AUDIT_LABELS: Record<string, string> = {
   login_succeeded: 'Login realizado', login_failed: 'Tentativa de login recusada', logout: 'Sessão encerrada',
   password_changed: 'Senha alterada', user_created: 'Usuário criado', user_updated: 'Usuário atualizado',
+  user_deleted: 'Usuário excluído',
   link_created: 'Link incluído', link_updated: 'Link editado', link_trashed: 'Link enviado à lixeira',
   links_trashed: 'Links enviados à lixeira', link_restored: 'Link restaurado', link_purged: 'Link excluído definitivamente',
   links_imported: 'Links importados', links_moved: 'Links movidos', links_copied: 'Links copiados',
@@ -31,6 +32,8 @@ export function AdminUsersDialog({ currentUserId, onClose }: AdminUsersDialogPro
   const [form, setForm] = useState({ username: '', displayName: '', password: '', role: 'user' as UserRole });
   const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null);
   const [temporaryPassword, setTemporaryPassword] = useState('');
+  const [editTarget, setEditTarget] = useState<ManagedUser | null>(null);
+  const [displayName, setDisplayName] = useState('');
 
   const loadUsers = async () => {
     const response = await apiRequest('/api/admin/users');
@@ -76,6 +79,30 @@ export function AdminUsersDialog({ currentUserId, onClose }: AdminUsersDialogPro
     }
   };
 
+  const saveDisplayName = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!editTarget) return;
+    if (await updateUser(editTarget, { displayName: displayName.trim() })) {
+      setEditTarget(null);
+      setDisplayName('');
+    }
+  };
+
+  const deleteUser = async (user: ManagedUser) => {
+    if (user.id === currentUserId) return;
+    if (!window.confirm(`Excluir o usuário ${user.display_name} (@${user.username})? Esta ação não pode ser desfeita.`)) return;
+    setBusy(true); setError('');
+    const response = await apiRequest(`/api/admin/users/${user.id}`, { method: 'DELETE' });
+    if (response.ok) {
+      if (resetTarget?.id === user.id) { setResetTarget(null); setTemporaryPassword(''); }
+      if (editTarget?.id === user.id) { setEditTarget(null); setDisplayName(''); }
+      await loadUsers();
+    } else {
+      setError(await readApiError(response, 'Não foi possível excluir o usuário.'));
+    }
+    setBusy(false);
+  };
+
   return <AppDialog wide title="Usuários/ Logs" onClose={onClose} busy={busy}>
     <div className="chartlink-admin-panel">
       <nav><button type="button" className={tab === 'users' ? 'is-active' : ''} onClick={() => setTab('users')}><Users size={16} />Usuários</button>
@@ -91,16 +118,28 @@ export function AdminUsersDialog({ currentUserId, onClose }: AdminUsersDialogPro
           <button type="submit" disabled={busy} className="chartlink-button-primary"><Plus size={16} />Criar</button>
         </form>
         {resetTarget && <form onSubmit={resetPassword} className="chartlink-password-reset-form">
-          <div><strong>Redefinir senha de {resetTarget.display_name}</strong><span>A senha será ocultada e deverá ser trocada no próximo acesso.</span></div>
+          <div><strong>Alterar senha de {resetTarget.display_name}</strong><span>A nova senha será ocultada e deverá ser trocada no próximo acesso.</span></div>
           <input autoFocus required minLength={6} type="password" autoComplete="new-password" placeholder="Senha temporária (6+ caracteres)" value={temporaryPassword} onChange={event => setTemporaryPassword(event.target.value)} />
           <button type="button" disabled={busy} className="chartlink-button-secondary" onClick={() => { setResetTarget(null); setTemporaryPassword(''); }}>Cancelar</button>
           <button type="submit" disabled={busy} className="chartlink-button-primary">Salvar senha</button>
+        </form>}
+        {editTarget && <form onSubmit={saveDisplayName} className="chartlink-user-edit-form">
+          <div><strong>Editar nome de @{editTarget.username}</strong><span>O login permanece inalterado.</span></div>
+          <input autoFocus required maxLength={120} value={displayName} onChange={event => setDisplayName(event.target.value)} aria-label={`Nome de exibição de ${editTarget.username}`} />
+          <button type="button" disabled={busy} className="chartlink-button-secondary" onClick={() => { setEditTarget(null); setDisplayName(''); }}><X size={15} />Cancelar</button>
+          <button type="submit" disabled={busy} className="chartlink-button-primary"><Save size={15} />Salvar nome</button>
         </form>}
         <div className="chartlink-users-list">{users.map(user => <article key={user.id}>
           <div><strong>{user.display_name}</strong><span>@{user.username} · Último acesso: {formatDate(user.last_login_at)}</span>{user.must_change_password ? <small>Troca de senha pendente</small> : null}</div>
           <select aria-label={`Perfil de ${user.username}`} value={user.role} disabled={busy || user.id === currentUserId} title={user.id === currentUserId ? 'Outro administrador deve alterar seu perfil.' : undefined} onChange={event => void updateUser(user, { role: event.target.value as UserRole })}><option value="user">Usuário</option><option value="admin">Administrador</option></select>
           <label className="chartlink-active-toggle" title={user.id === currentUserId ? 'Você não pode desativar a própria conta.' : undefined}><input type="checkbox" checked={!!user.active} disabled={busy || user.id === currentUserId} onChange={event => void updateUser(user, { active: event.target.checked })} />Ativo</label>
-          <button type="button" disabled={busy} onClick={() => { setResetTarget(user); setTemporaryPassword(''); }}><RefreshCw size={15} />Redefinir senha</button>
+          <div className="chartlink-user-actions">
+            <button type="button" disabled={busy} onClick={() => { setResetTarget(null); setTemporaryPassword(''); setEditTarget(user); setDisplayName(user.display_name); }}><Pencil size={15} />Editar nome</button>
+            <button type="button" disabled={busy} onClick={() => { setEditTarget(null); setDisplayName(''); setResetTarget(user); setTemporaryPassword(''); }}><RefreshCw size={15} />Alterar senha</button>
+            <button type="button" className="is-danger" disabled={busy || user.id === currentUserId}
+              title={user.id === currentUserId ? 'Você não pode excluir a própria conta.' : `Excluir @${user.username}`}
+              onClick={() => void deleteUser(user)}><Trash2 size={15} />Excluir</button>
+          </div>
         </article>)}</div>
       </>}
       {tab === 'audit' && <div className="chartlink-audit-list">

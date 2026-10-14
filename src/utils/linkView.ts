@@ -9,6 +9,11 @@ function compareTitles(a: ChartLink, b: ChartLink): number {
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
+/** Ordem fixa da árvore lateral, independente do filtro aplicado aos cards. */
+export function sortSidebarLinks(links: readonly ChartLink[]): ChartLink[] {
+  return [...links].sort(compareTitles);
+}
+
 function rootCategory(link: ChartLink): string {
   return link.folderPaths[0]?.[0] || link.folderPath[0] || link.category || '';
 }

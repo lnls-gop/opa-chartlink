@@ -88,6 +88,15 @@ class AuthenticationTests(unittest.TestCase):
         }, headers={"X-CSRF-Token": token})
         self.assertEqual(created.status_code, 201, created.get_json())
         self.assertTrue(any(row["username"] == "novo.usuario" for row in admin.get("/api/admin/users").get_json()))
+        user_id = created.get_json()["id"]
+        updated = admin.put(f"/api/admin/users/{user_id}", json={
+            "displayName": "Nome Atualizado", "role": "user", "active": True,
+            "newPassword": "SenhaAtualizada#2026",
+        }, headers={"X-CSRF-Token": token})
+        self.assertEqual(updated.status_code, 200, updated.get_json())
+        self.assertEqual(updated.get_json()["display_name"], "Nome Atualizado")
+        self.assertEqual(admin.delete(f"/api/admin/users/{user_id}", headers={"X-CSRF-Token": token}).status_code, 200)
+        self.assertFalse(any(row["id"] == user_id for row in admin.get("/api/admin/users").get_json()))
 
     def test_last_admin_cannot_be_disabled_or_demote_itself(self):
         admin, token = self.login("admin", "frase segura de teste 123")
@@ -97,6 +106,8 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(disabled.status_code, 409)
         demoted = admin.put(f"/api/admin/users/{current['id']}", json={**common, "active": True, "role": "user"}, headers={"X-CSRF-Token": token})
         self.assertEqual(demoted.status_code, 409)
+        deleted = admin.delete(f"/api/admin/users/{current['id']}", headers={"X-CSRF-Token": token})
+        self.assertEqual(deleted.status_code, 409)
 
     def test_executable_protocols_are_rejected_on_create_and_update(self):
         guest, guest_token = self.client_with_csrf()
