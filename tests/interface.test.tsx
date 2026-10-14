@@ -12,7 +12,7 @@ import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH } from '../
 import { getCategoryStyle, linkPresentation, resolveFolderColor } from '../src/styles/categoryStyles';
 import { matchRegex } from '../src/search/matcher';
 import { resolveLinkUrl, formatLinkDate } from '../src/utils/linkUrl';
-import { scopeLinks, sortLinks } from '../src/utils/linkView';
+import { scopeLinks, sortLinks, sortSidebarLinks } from '../src/utils/linkView';
 import { createTemporaryId } from '../src/utils/temporaryId';
 import { UNCLASSIFIED_CATEGORY, UNCLASSIFIED_CATEGORY_COLOR } from '../src/constants/categories';
 import { isThemePreference, resolveTheme } from '../src/theme/theme';
@@ -92,12 +92,24 @@ test('menu contextual preserva os ícones e usa pasta com adição para subcateg
 test('seletor oferece os três temas e a resolução automática acompanha o sistema', () => {
   const html = renderToStaticMarkup(<ThemeSelector preference="system" resolved="dark" onChange={noop} />);
   assert.match(html, /Tema: Sistema/);
+  assert.match(html, /lucide-sun/);
   assert.match(html, /lucide-monitor/);
+  assert.match(html, /lucide-moon/);
+  assert.doesNotMatch(html, /menuitemradio|lucide-chevron-down/);
   assert.equal(resolveTheme('system', true), 'dark');
   assert.equal(resolveTheme('system', false), 'light');
   assert.equal(resolveTheme('dark', false), 'dark');
   assert.equal(isThemePreference('light'), true);
   assert.equal(isThemePreference('invalid'), false);
+});
+
+test('ordenação da árvore lateral permanece por título e não acompanha o filtro dos cards', () => {
+  const source = [
+    { ...link, id: 'recent', title: 'Zulu', createdAt: 1700000000400 },
+    { ...link, id: 'old', title: 'Alfa', createdAt: 1700000000100 },
+  ];
+  assert.deepEqual(sortLinks(source, 'recent').map(row => row.id), ['recent', 'old']);
+  assert.deepEqual(sortSidebarLinks(source).map(row => row.id), ['old', 'recent']);
 });
 
 test('a paleta herda do pai, aceita preto, permite override e usa a classificação da pasta filtrada', () => {

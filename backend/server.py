@@ -680,6 +680,27 @@ def admin_update_user(user_id):
     return jsonify({"id": user_id, "username": target["username"], "display_name": display_name, "role": role, "active": active, "must_change_password": must_change})
 
 
+@app.route("/api/admin/users/<int:user_id>", methods=["DELETE"])
+@admin_required
+def admin_delete_user(user_id):
+    db = get_db()
+    target = db.execute("SELECT id,username,display_name,role,active FROM users WHERE id=?", (user_id,)).fetchone()
+    if not target:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    if user_id == g.current_user["id"]:
+        return jsonify({"error": "Você não pode excluir a própria conta."}), 409
+    if target["role"] == "admin" and target["active"] and remaining_active_admins(excluding_id=user_id) == 0:
+        return jsonify({"error": "Não é permitido excluir o último administrador ativo."}), 409
+    audit("user_deleted", "user", user_id, {
+        "username": target["username"],
+        "displayName": target["display_name"],
+        "role": target["role"],
+    })
+    db.execute("DELETE FROM users WHERE id=?", (user_id,))
+    db.commit()
+    return jsonify({"deleted": True, "id": user_id})
+
+
 @app.route("/api/admin/audit", methods=["GET"])
 @admin_required
 def admin_audit():
